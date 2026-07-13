@@ -1,0 +1,16 @@
+{
+  "name": "discord-booking-bot",
+  "version": "0.1.0",
+  "description": "出租迴響群 - 預約管理 Discord 機器人 POC",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "deploy": "node src/deploy-commands.js",
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0",
+    "discord.js": "^14.14.1",
+    "dotenv": "^16.4.5"
+  }
+}
