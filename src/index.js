@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { Client, GatewayIntentBits, Partials, Events, ChannelType, AttachmentBuilder, EmbedBuilder } from "discord.js";
+import { Client, GatewayIntentBits, Partials, Events, ChannelType, AttachmentBuilder } from "discord.js";
 import cron from "node-cron";
 import { existsSync } from "node:fs";
 import path from "node:path";
@@ -8,7 +8,7 @@ import {
   getBookingByMessageId,
   updateBookingFromMessage,
   deleteBookingByMessageId,
-  getBookingsByDateLocation,
+  getBookingsByDate,
   getConfirmedBookingsByDate,
   getSummaryMessage,
   getSummaryByThreadId,
@@ -19,13 +19,12 @@ import {
 import {
   formatGuideText,
   formatThreadTitle,
-  formatDateLabel,
-  getWeekdayLabel,
   getWeekdayIndex,
   getBookingDateToday,
   addDays,
   timeToMinutes,
   parseBookingMessage,
+  buildSummaryEmbed,
 } from "./format.js";
 
 const client = new Client({
@@ -140,31 +139,6 @@ function buildWeekdayAttachment(bookingDate) {
   return new AttachmentBuilder(filePath);
 }
 
-// 把當天預約清單做成 embed 卡片，跟上方的格式教學區隔開來，比較顯眼
-function buildSummaryEmbed(bookingDate, bookings) {
-  const title = `📅 ${formatDateLabel(bookingDate)} (${getWeekdayLabel(bookingDate)}) 預約統計`;
-  const embed = new EmbedBuilder().setTitle(title).setColor(0x5865f2);
-
-  if (!bookings.length) {
-    embed.setDescription("目前尚無預約 🌙");
-    return embed;
-  }
-
-  const sorted = bookings
-    .slice()
-    .sort((a, b) => timeToMinutes(a.scheduled_time) - timeToMinutes(b.scheduled_time));
-
-  const description = sorted
-    .map((b) => {
-      const proxyLine = b.proxy_for ? `　(代約: ${b.proxy_for})` : "";
-      return `🕒 **${b.scheduled_time}**　📍 ${b.location}　🔀 ${b.channel || "當日決定"}\n👤 <@${b.booker_id}>${proxyLine}`;
-    })
-    .join("\n┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈\n");
-
-  embed.setDescription(description);
-  return embed;
-}
-
 async function createDailyThread(parent, bookingDate) {
   const guideText = formatGuideText(bookingDate);
   const attachment = buildWeekdayAttachment(bookingDate);
@@ -260,17 +234,17 @@ async function handleBookingMessage(message, { isEdit }) {
   const bookingDate = summaryRow.booking_date;
   const existingBooking = getBookingByMessageId(message.id);
 
-  const conflict = getBookingsByDateLocation(bookingDate, location).find((b) => {
+  const conflict = getBookingsByDate(bookingDate).find((b) => {
     if (existingBooking && b.id === existingBooking.id) return false; // 排除自己（編輯情境）
     const mins = timeToMinutes(b.scheduled_time);
-    return mins !== null && Math.abs(mins - newMinutes) <= 10;
+    return mins !== null && Math.abs(mins - newMinutes) <= 5;
   });
 
   if (conflict) {
     await safeReact(message, "❌");
     await message
       .reply(
-        `這個時段衝突了：${location} 在 ${conflict.scheduled_time} 已經有人預約（前後 10 分鐘內不可重複），請改個時間再留言一次。`
+        `這個時段衝突了：${conflict.location} 在 ${conflict.scheduled_time} 已經有人預約（前後 5 分鐘內不可重複），請改個時間再留言一次。`
       )
       .catch(() => {});
     return;

@@ -1,4 +1,6 @@
 // 產生固定格式的【預約統計】訊息（含格式教學 + 目前預約清單）
+import { EmbedBuilder } from "discord.js";
+
 // 固定不變的格式教學（討論串建立時發一次，不會再被編輯）
 export function formatGuideText(bookingDate) {
   const header = `【${formatDateLabel(bookingDate)} (${getWeekdayLabel(bookingDate)}) 預約說明】`;
@@ -65,6 +67,31 @@ export function timeToMinutes(timeStr) {
   const match = (timeStr || "").trim().match(/^([0-1]?\d|2[0-3]):([0-5]\d)$/);
   if (!match) return null;
   return Number(match[1]) * 60 + Number(match[2]);
+}
+
+// 把當天預約清單做成 embed 卡片，index.js 跟一次性遷移腳本共用這個函式
+export function buildSummaryEmbed(bookingDate, bookings) {
+  const title = `📅 ${formatDateLabel(bookingDate)} (${getWeekdayLabel(bookingDate)}) 預約統計`;
+  const embed = new EmbedBuilder().setTitle(title).setColor(0x5865f2);
+
+  if (!bookings.length) {
+    embed.setDescription("目前尚無預約 🌙");
+    return embed;
+  }
+
+  const sorted = bookings
+    .slice()
+    .sort((a, b) => timeToMinutes(a.scheduled_time) - timeToMinutes(b.scheduled_time));
+
+  const description = sorted
+    .map((b) => {
+      const proxyLine = b.proxy_for ? `　(代約: ${b.proxy_for})` : "";
+      return `🕒 **${b.scheduled_time}**　📍 ${b.location}　🔀 ${b.channel || "當日決定"}\n👤 <@${b.booker_id}>${proxyLine}`;
+    })
+    .join("\n┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈\n");
+
+  embed.setDescription(description);
+  return embed;
 }
 
 // 解析使用者在討論串留的固定格式留言

@@ -64,12 +64,12 @@ export function deleteBookingByMessageId(messageId) {
   db.prepare(`DELETE FROM bookings WHERE message_id = ?`).run(messageId);
 }
 
-// 同一天、同一地點的所有已確認預約（用於衝突比對）
-export function getBookingsByDateLocation(bookingDate, location) {
+// 同一天的所有已確認預約（用於衝突比對，不分地點/頻道）
+export function getBookingsByDate(bookingDate) {
   return db.prepare(`
     SELECT * FROM bookings
-    WHERE booking_date = ? AND location = ? AND status = 'confirmed'
-  `).all(bookingDate, location);
+    WHERE booking_date = ? AND status = 'confirmed'
+  `).all(bookingDate);
 }
 
 export function getConfirmedBookingsByDate(bookingDate) {
