@@ -1,0 +1,23 @@
+# 相依套件
+node_modules/
+
+# 環境變數（含機器人 Token，絕對不能上傳）
+.env
+
+# SQLite 資料庫檔案（含實際預約資料，不該進版控）
+bookings.db
+bookings.db-journal
+bookings.db-wal
+bookings.db-shm
+
+# npm 相關
+package-lock.json.bak
+npm-debug.log*
+
+# 編輯器/系統雜項
+.vscode/
+.DS_Store
+*.log
+
+# node-gyp 編譯產物
+build/
