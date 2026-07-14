@@ -1,174 +1,336 @@
 import "dotenv/config";
-import {
-  Client,
-  GatewayIntentBits,
-  ModalBuilder,
-  TextInputBuilder,
-  TextInputStyle,
-  ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
-  EmbedBuilder,
-} from "discord.js";
+import { Client, GatewayIntentBits, Partials, Events, ChannelType, AttachmentBuilder, EmbedBuilder } from "discord.js";
+import cron from "node-cron";
+import { existsSync } from "node:fs";
+import path from "node:path";
 import {
   insertBooking,
-  getBooking,
-  updateBookingStatus,
+  getBookingByMessageId,
+  updateBookingFromMessage,
+  deleteBookingByMessageId,
+  getBookingsByDateLocation,
   getConfirmedBookingsByDate,
   getSummaryMessage,
+  getSummaryByThreadId,
   setSummaryMessage,
+  getUnlockedPastSummaries,
+  markSummaryLocked,
 } from "./db.js";
-import { formatSummary, getBookingDateToday } from "./format.js";
+import {
+  formatGuideText,
+  formatThreadTitle,
+  formatDateLabel,
+  getWeekdayLabel,
+  getWeekdayIndex,
+  getBookingDateToday,
+  addDays,
+  timeToMinutes,
+  parseBookingMessage,
+} from "./format.js";
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
-
-client.once("ready", () => {
-  console.log(`已登入：${client.user.tag}`);
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+  ],
+  partials: [Partials.Message, Partials.Channel],
 });
 
-client.on("interactionCreate", async (interaction) => {
+// 0=週日 ... 6=週六 對應的星期圖片檔名，請把對應圖片放到 assets/weekday/ 底下
+const WEEKDAY_IMAGE_FILES = ["sun.png", "mon.png", "tue.png", "wed.png", "thu.png", "fri.png", "sat.png"];
+
+client.once(Events.ClientReady, async () => {
+  console.log(`已登入：${client.user.tag}`);
+  await ensureUpcomingThreads();
+  await lockPastThreads();
+  // 每天固定時間：補開新的一天 + 鎖定已過期的討論串
+  cron.schedule(
+    "5 0 * * *",
+    async () => {
+      await ensureUpcomingThreads();
+      await lockPastThreads();
+    },
+    { timezone: "Asia/Ho_Chi_Minh" }
+  );
+});
+
+// 確保「今天 ~ 今天+6天」這 7 天的討論串都已經建立
+async function ensureUpcomingThreads() {
+  const parent = await client.channels.fetch(process.env.BOOKING_PARENT_CHANNEL_ID);
+  const today = getBookingDateToday();
+
+  for (let i = 0; i <= 6; i++) {
+    const date = addDays(today, i);
+    if (getSummaryMessage(date)) continue;
+
+    const title = formatThreadTitle(date);
+    const existing = await findExistingThreadByName(parent, title);
+
+    if (existing) {
+      const linked = await reuseExistingThread(existing, date);
+      if (linked) {
+        console.log(`發現既有討論串，已重新連結：${date}`);
+        await logToAdmin(`🔗 發現既有討論串，已重新連結：${title}`);
+      } else {
+        console.warn(`找到同名討論串「${title}」，但抓不到統計訊息，略過（可能要手動處理）`);
+      }
+      continue;
+    }
+
+    await createDailyThread(parent, date);
+  }
+}
+
+// 在頻道底下（含活躍與已封存）找有沒有同名的討論串，避免重複建立
+async function findExistingThreadByName(parent, name) {
+  const active = await parent.threads.fetchActive();
+  let found = active.threads.find((t) => t.name === name);
+  if (found) return found;
+
   try {
-    if (interaction.isChatInputCommand() && interaction.commandName === "預約") {
-      await handleSlashCommand(interaction);
-    } else if (interaction.isModalSubmit() && interaction.customId === "booking_modal") {
-      await handleModalSubmit(interaction);
-    } else if (interaction.isButton() && interaction.customId.startsWith("confirm_")) {
-      await handleDecision(interaction, "confirmed");
-    } else if (interaction.isButton() && interaction.customId.startsWith("reject_")) {
-      await handleDecision(interaction, "rejected");
-    }
+    const archived = await parent.threads.fetchArchived();
+    found = archived.threads.find((t) => t.name === name);
   } catch (err) {
-    console.error(err);
-    if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
-      await interaction.reply({ content: "發生錯誤，請稍後再試或聯絡管理員。", ephemeral: true });
+    console.warn("查詢已封存討論串失敗：", err.message);
+  }
+  return found || null;
+}
+
+// 找到既有討論串時，從裡面已置頂的 embed 訊息重新連結，不重新建立新的統計訊息
+async function reuseExistingThread(thread, bookingDate) {
+  try {
+    const pinned = await thread.messages.fetchPinned();
+    const statsMsg = pinned.find((m) => m.embeds.length > 0);
+    if (!statsMsg) return false;
+    setSummaryMessage(bookingDate, thread.id, statsMsg.id);
+    return true;
+  } catch (err) {
+    console.warn(`重新連結討論串失敗 (${bookingDate})：`, err.message);
+    return false;
+  }
+}
+
+// 把日期已經過去、還沒被鎖定的討論串鎖定 + 封存（不刪除）
+async function lockPastThreads() {
+  const today = getBookingDateToday();
+  const rows = getUnlockedPastSummaries(today);
+
+  for (const row of rows) {
+    try {
+      const thread = await client.channels.fetch(row.channel_id);
+      await thread.setLocked(true, "已過期，自動鎖定");
+      await thread.setArchived(true, "已過期，自動封存");
+      markSummaryLocked(row.booking_date);
+      console.log(`已鎖定討論串：${row.booking_date}`);
+      await logToAdmin(`🔒 已鎖定討論串：${formatThreadTitle(row.booking_date)}`);
+    } catch (err) {
+      console.warn(`鎖定討論串失敗 (${row.booking_date})：`, err.message);
     }
+  }
+}
+
+function buildWeekdayAttachment(bookingDate) {
+  const fileName = WEEKDAY_IMAGE_FILES[getWeekdayIndex(bookingDate)];
+  const filePath = path.join(process.cwd(), "assets", "weekday", fileName);
+  if (!existsSync(filePath)) {
+    console.warn(`找不到星期圖片：${filePath}（可放進 assets/weekday/ 資料夾）`);
+    return null;
+  }
+  return new AttachmentBuilder(filePath);
+}
+
+// 把當天預約清單做成 embed 卡片，跟上方的格式教學區隔開來，比較顯眼
+function buildSummaryEmbed(bookingDate, bookings) {
+  const title = `📅 ${formatDateLabel(bookingDate)} (${getWeekdayLabel(bookingDate)}) 預約統計`;
+  const embed = new EmbedBuilder().setTitle(title).setColor(0x5865f2);
+
+  if (!bookings.length) {
+    embed.setDescription("目前尚無預約 🌙");
+    return embed;
+  }
+
+  const sorted = bookings
+    .slice()
+    .sort((a, b) => timeToMinutes(a.scheduled_time) - timeToMinutes(b.scheduled_time));
+
+  const description = sorted
+    .map((b) => {
+      const proxyLine = b.proxy_for ? `　(代約: ${b.proxy_for})` : "";
+      return `🕒 **${b.scheduled_time}**　📍 ${b.location}　🔀 ${b.channel || "當日決定"}\n👤 <@${b.booker_id}>${proxyLine}`;
+    })
+    .join("\n┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈\n");
+
+  embed.setDescription(description);
+  return embed;
+}
+
+async function createDailyThread(parent, bookingDate) {
+  const guideText = formatGuideText(bookingDate);
+  const attachment = buildWeekdayAttachment(bookingDate);
+  const files = attachment ? [attachment] : [];
+  const isForum = parent.type === ChannelType.GuildForum;
+
+  let thread;
+  let guideMsg;
+
+  if (isForum) {
+    // 論壇頻道：建立討論串時「必須」同時附上第一則訊息
+    thread = await parent.threads.create({
+      name: formatThreadTitle(bookingDate),
+      autoArchiveDuration: 10080,
+      reason: "每日自動建立預約討論串",
+      message: { content: guideText, files },
+    });
+    guideMsg = await thread.fetchStarterMessage();
+  } else {
+    // 一般文字頻道：先建立空討論串，再發第一則訊息
+    thread = await parent.threads.create({
+      name: formatThreadTitle(bookingDate),
+      autoArchiveDuration: 10080,
+      type: ChannelType.PublicThread,
+      reason: "每日自動建立預約討論串",
+    });
+    guideMsg = await thread.send({ content: guideText, files });
+  }
+  await guideMsg.pin().catch((err) => console.warn("置頂失敗（可能缺少 Manage Messages 權限）：", err.message));
+
+  // 班表用獨立的 embed 訊息呈現，跟上面的說明分開，比較顯眼
+  const statsEmbed = buildSummaryEmbed(bookingDate, []);
+  const statsMsg = await thread.send({ embeds: [statsEmbed] });
+  await statsMsg.pin().catch((err) => console.warn("置頂失敗（可能缺少 Manage Messages 權限）：", err.message));
+
+  setSummaryMessage(bookingDate, thread.id, statsMsg.id);
+  console.log(`已建立討論串：${bookingDate}`);
+  await logToAdmin(`🧵 已建立討論串：${formatThreadTitle(bookingDate)}`);
+}
+
+client.on(Events.MessageCreate, async (message) => {
+  if (message.author.bot) return;
+  if (!message.channel.isThread()) return;
+  await handleBookingMessage(message, { isEdit: false });
+});
+
+client.on(Events.MessageUpdate, async (oldMessage, newMessage) => {
+  try {
+    const full = newMessage.partial ? await newMessage.fetch() : newMessage;
+    if (full.author.bot) return;
+    if (!full.channel.isThread()) return;
+    await handleBookingMessage(full, { isEdit: true });
+  } catch (err) {
+    console.error("處理編輯訊息時發生錯誤：", err);
   }
 });
 
-// 1. 跳出 Modal 表單
-async function handleSlashCommand(interaction) {
-  const modal = new ModalBuilder().setCustomId("booking_modal").setTitle("預約《出租迴響群》");
+client.on(Events.MessageDelete, async (message) => {
+  try {
+    const booking = getBookingByMessageId(message.id);
+    if (!booking) return;
+    deleteBookingByMessageId(message.id);
+    await refreshSummaryMessage(booking.booking_date);
+  } catch (err) {
+    console.error("處理刪除訊息時發生錯誤：", err);
+  }
+});
 
-  const locationInput = new TextInputBuilder()
-    .setCustomId("location")
-    .setLabel("地點")
-    .setStyle(TextInputStyle.Short)
-    .setRequired(true);
+async function handleBookingMessage(message, { isEdit }) {
+  const summaryRow = getSummaryByThreadId(message.channelId);
+  if (!summaryRow) return; // 不是預約討論串，忽略
+  if (message.id === summaryRow.message_id) return; // 忽略統計訊息本身
 
-  const timeInput = new TextInputBuilder()
-    .setCustomId("time")
-    .setLabel("時間（例如 21:00）")
-    .setStyle(TextInputStyle.Short)
-    .setRequired(true);
+  const { location, time, channel, proxyFor } = parseBookingMessage(message.content);
 
-  const channelInput = new TextInputBuilder()
-    .setCustomId("channel")
-    .setLabel("頻道（不確定可留空，會顯示「當日決定」）")
-    .setStyle(TextInputStyle.Short)
-    .setRequired(false);
-
-  const proxyInput = new TextInputBuilder()
-    .setCustomId("proxy_for")
-    .setLabel("代約對象（若非代約請留空）")
-    .setStyle(TextInputStyle.Short)
-    .setRequired(false);
-
-  modal.addComponents(
-    new ActionRowBuilder().addComponents(locationInput),
-    new ActionRowBuilder().addComponents(timeInput),
-    new ActionRowBuilder().addComponents(channelInput),
-    new ActionRowBuilder().addComponents(proxyInput)
-  );
-
-  await interaction.showModal(modal);
-}
-
-// 2. 表單送出 -> 存 DB(pending) -> 推播確認卡片到管理頻道
-async function handleModalSubmit(interaction) {
-  const location = interaction.fields.getTextInputValue("location").trim();
-  const time = interaction.fields.getTextInputValue("time").trim();
-  const channel = interaction.fields.getTextInputValue("channel").trim();
-  const proxyFor = interaction.fields.getTextInputValue("proxy_for").trim();
-
-  const bookingDate = getBookingDateToday();
-  const bookingId = insertBooking({
-    guildId: interaction.guildId,
-    bookingDate,
-    location,
-    time,
-    channel,
-    bookerId: interaction.user.id,
-    proxyFor,
-  });
-
-  await interaction.reply({ content: "已收到你的預約，等待管理員確認～", ephemeral: true });
-
-  const adminChannel = await client.channels.fetch(process.env.ADMIN_CHANNEL_ID);
-  const embed = new EmbedBuilder()
-    .setTitle("新預約待確認")
-    .addFields(
-      { name: "地點", value: location, inline: true },
-      { name: "時間", value: time, inline: true },
-      { name: "頻道", value: channel || "當日決定", inline: true },
-      { name: "預約人", value: `<@${interaction.user.id}>`, inline: true },
-      { name: "代約對象", value: proxyFor || "（無）", inline: true }
-    )
-    .setFooter({ text: `Booking ID: ${bookingId}` });
-
-  const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`confirm_${bookingId}`).setLabel("✅ 確認").setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId(`reject_${bookingId}`).setLabel("❌ 退回").setStyle(ButtonStyle.Danger)
-  );
-
-  await adminChannel.send({ embeds: [embed], components: [row] });
-}
-
-// 3. 管理員按下確認/退回
-async function handleDecision(interaction, status) {
-  const bookingId = interaction.customId.split("_")[1];
-  const booking = getBooking(bookingId);
-
-  if (!booking) {
-    await interaction.reply({ content: "找不到這筆預約，可能已被處理過。", ephemeral: true });
+  if (!location || !time) {
+    await safeReact(message, "❌");
+    await message
+      .reply(
+        "格式好像不太對，請確認有填「地點」跟「時間」，例如：\n```\n地點：龍王\n時間：21:30\n頻道：當日決定\n```"
+      )
+      .catch(() => {});
     return;
   }
 
-  updateBookingStatus(bookingId, status);
+  const newMinutes = timeToMinutes(time);
+  if (newMinutes === null) {
+    await safeReact(message, "❌");
+    await message.reply("時間格式看起來不對，請用 24 小時制 HH:MM，例如 21:30。").catch(() => {});
+    return;
+  }
 
-  const disabledRow = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId("noop_confirm").setLabel("✅ 確認").setStyle(ButtonStyle.Success).setDisabled(true),
-    new ButtonBuilder().setCustomId("noop_reject").setLabel("❌ 退回").setStyle(ButtonStyle.Danger).setDisabled(true)
+  const bookingDate = summaryRow.booking_date;
+  const existingBooking = getBookingByMessageId(message.id);
+
+  const conflict = getBookingsByDateLocation(bookingDate, location).find((b) => {
+    if (existingBooking && b.id === existingBooking.id) return false; // 排除自己（編輯情境）
+    const mins = timeToMinutes(b.scheduled_time);
+    return mins !== null && Math.abs(mins - newMinutes) <= 10;
+  });
+
+  if (conflict) {
+    await safeReact(message, "❌");
+    await message
+      .reply(
+        `這個時段衝突了：${location} 在 ${conflict.scheduled_time} 已經有人預約（前後 10 分鐘內不可重複），請改個時間再留言一次。`
+      )
+      .catch(() => {});
+    return;
+  }
+
+  if (existingBooking) {
+    updateBookingFromMessage(message.id, { location, time, channel, proxyFor });
+  } else {
+    insertBooking({
+      guildId: message.guildId,
+      bookingDate,
+      messageId: message.id,
+      location,
+      time,
+      channel,
+      bookerId: message.author.id,
+      proxyFor,
+    });
+  }
+
+  await safeReact(message, "✅");
+  await refreshSummaryMessage(bookingDate);
+  await logToAdmin(
+    `📋 ${isEdit ? "更新" : "新"}預約｜${bookingDate}｜${location} / ${time} / ${channel || "當日決定"}｜<@${message.author.id}>`
   );
+}
 
-  const resultText = status === "confirmed" ? `已由 <@${interaction.user.id}> 確認 ✅` : `已由 <@${interaction.user.id}> 退回 ❌`;
-  await interaction.update({ components: [disabledRow] });
-  await interaction.followUp({ content: resultText, ephemeral: false });
-
-  if (status === "confirmed") {
-    await refreshSummaryMessage(booking.booking_date);
+async function safeReact(message, emoji) {
+  try {
+    await message.react(emoji);
+  } catch (err) {
+    console.warn("加上反應失敗：", err.message);
   }
 }
 
-// 4. 重新渲染 & 編輯【預約統計】訊息
-async function refreshSummaryMessage(bookingDate) {
-  const bookings = getConfirmedBookingsByDate(bookingDate);
-  const text = formatSummary(bookings);
-
-  const summaryChannel = await client.channels.fetch(process.env.SUMMARY_CHANNEL_ID);
-  const existing = getSummaryMessage(bookingDate);
-
-  if (existing) {
-    try {
-      const msg = await summaryChannel.messages.fetch(existing.message_id);
-      await msg.edit(text);
-      return;
-    } catch (err) {
-      console.warn("原本的統計訊息抓不到，改成重新發一則：", err.message);
-    }
+// 把訊息推播到管理頻道（純紀錄用，沒設定 ADMIN_CHANNEL_ID 就跳過）
+async function logToAdmin(text) {
+  if (!process.env.ADMIN_CHANNEL_ID) return;
+  try {
+    const adminChannel = await client.channels.fetch(process.env.ADMIN_CHANNEL_ID);
+    await adminChannel.send(text);
+  } catch (err) {
+    console.warn("管理頻道紀錄推播失敗：", err.message);
   }
+}
 
-  const newMsg = await summaryChannel.send(text);
-  setSummaryMessage(bookingDate, summaryChannel.id, newMsg.id);
+// 重新渲染 & 編輯（並確保置頂）指定日期的班表 embed
+async function refreshSummaryMessage(bookingDate) {
+  const summaryRow = getSummaryMessage(bookingDate);
+  if (!summaryRow) return;
+
+  const bookings = getConfirmedBookingsByDate(bookingDate);
+  const embed = buildSummaryEmbed(bookingDate, bookings);
+
+  const thread = await client.channels.fetch(summaryRow.channel_id);
+  const msg = await thread.messages.fetch(summaryRow.message_id);
+  await msg.edit({ embeds: [embed] });
+  if (!msg.pinned) {
+    await msg.pin().catch((err) => console.warn("置頂失敗（可能缺少 Manage Messages 權限）：", err.message));
+  }
 }
 
 client.login(process.env.DISCORD_TOKEN);
