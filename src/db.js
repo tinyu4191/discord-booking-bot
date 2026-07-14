@@ -53,6 +53,22 @@ export function getBookingByMessageId(messageId) {
   return db.prepare(`SELECT * FROM bookings WHERE message_id = ?`).get(messageId);
 }
 
+// 依內部 id 查詢/更新/刪除，給人工後台管理用（例如處理沒有對應真實留言的舊資料）
+export function getBookingById(id) {
+  return db.prepare(`SELECT * FROM bookings WHERE id = ?`).get(id);
+}
+
+export function updateBookingById(id, { location, time, channel, proxyFor }) {
+  db.prepare(`
+    UPDATE bookings SET location = ?, scheduled_time = ?, channel = ?, proxy_for = ?
+    WHERE id = ?
+  `).run(location, time, channel, proxyFor || null, id);
+}
+
+export function deleteBookingById(id) {
+  db.prepare(`DELETE FROM bookings WHERE id = ?`).run(id);
+}
+
 export function updateBookingFromMessage(messageId, { location, time, channel, proxyFor }) {
   db.prepare(`
     UPDATE bookings SET location = ?, scheduled_time = ?, channel = ?, proxy_for = ?
