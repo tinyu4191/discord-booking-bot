@@ -237,7 +237,7 @@ async function handleBookingMessage(message, { isEdit }) {
   const conflict = getBookingsByDate(bookingDate).find((b) => {
     if (existingBooking && b.id === existingBooking.id) return false; // 排除自己（編輯情境）
     const mins = timeToMinutes(b.scheduled_time);
-    return mins !== null && Math.abs(mins - newMinutes) <= 5;
+    return mins !== null && Math.abs(mins - newMinutes) < 5;
   });
 
   if (conflict) {
