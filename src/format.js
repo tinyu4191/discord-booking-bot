@@ -94,6 +94,12 @@ export function buildSummaryEmbed(bookingDate, bookings) {
   return embed;
 }
 
+// 判斷這則留言看起來像不像是要預約（有沒有出現「地點：」或「時間：」關鍵字）
+// 用來過濾掉客服對話、閒聊等一般留言，避免機器人誤判成格式錯誤而亂回覆
+export function isBookingAttempt(content) {
+  return /地點[:：]|時間[:：]/.test(content || "");
+}
+
 // 解析使用者在討論串留的固定格式留言
 // 支援全形/半形冒號，並且會自動去掉像「(不確定可寫當日決定)」這種提示文字
 export function parseBookingMessage(content) {

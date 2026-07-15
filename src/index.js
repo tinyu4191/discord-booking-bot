@@ -24,6 +24,7 @@ import {
   addDays,
   timeToMinutes,
   parseBookingMessage,
+  isBookingAttempt,
   buildSummaryEmbed,
 } from "./format.js";
 
@@ -211,6 +212,7 @@ async function handleBookingMessage(message, { isEdit }) {
   const summaryRow = getSummaryByThreadId(message.channelId);
   if (!summaryRow) return; // 不是預約討論串，忽略
   if (message.id === summaryRow.message_id) return; // 忽略統計訊息本身
+  if (!isBookingAttempt(message.content)) return; // 不像預約格式（客服對話/閒聊），直接忽略
 
   const { location, time, channel, proxyFor } = parseBookingMessage(message.content);
 
