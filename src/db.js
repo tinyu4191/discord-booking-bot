@@ -31,6 +31,18 @@ db.exec(`
   )
 `);
 
+// 記錄「某天某時段不開放預約」的設定（例如負責施法的人臨時不能上線）
+db.exec(`
+  CREATE TABLE IF NOT EXISTS blocked_slots (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    booking_date TEXT NOT NULL,
+    start_time   TEXT NOT NULL,  -- HH:MM
+    end_time     TEXT NOT NULL,  -- HH:MM
+    reason       TEXT,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+  )
+`);
+
 export function insertBooking({ guildId, bookingDate, messageId, location, time, channel, bookerId, proxyFor }) {
   const stmt = db.prepare(`
     INSERT INTO bookings (guild_id, booking_date, message_id, location, scheduled_time, channel, booker_id, proxy_for)
@@ -80,7 +92,6 @@ export function deleteBookingByMessageId(messageId) {
   db.prepare(`DELETE FROM bookings WHERE message_id = ?`).run(messageId);
 }
 
-// 同一天的所有已確認預約（用於衝突比對，不分地點/頻道）
 export function getBookingsByDate(bookingDate) {
   return db.prepare(`
     SELECT * FROM bookings
@@ -122,6 +133,31 @@ export function getUnlockedPastSummaries(todayStr) {
 
 export function markSummaryLocked(bookingDate) {
   db.prepare(`UPDATE daily_summary SET locked = 1 WHERE booking_date = ?`).run(bookingDate);
+}
+
+// ---- 鎖定時段（不開放預約）相關 ----
+
+export function insertBlockedSlot({ bookingDate, startTime, endTime, reason }) {
+  const stmt = db.prepare(`
+    INSERT INTO blocked_slots (booking_date, start_time, end_time, reason)
+    VALUES (?, ?, ?, ?)
+  `);
+  const result = stmt.run(bookingDate, startTime, endTime, reason || null);
+  return result.lastInsertRowid;
+}
+
+export function getBlockedSlotsByDate(bookingDate) {
+  return db.prepare(`
+    SELECT * FROM blocked_slots WHERE booking_date = ? ORDER BY start_time
+  `).all(bookingDate);
+}
+
+export function getBlockedSlotById(id) {
+  return db.prepare(`SELECT * FROM blocked_slots WHERE id = ?`).get(id);
+}
+
+export function deleteBlockedSlot(id) {
+  db.prepare(`DELETE FROM blocked_slots WHERE id = ?`).run(id);
 }
 
 export default db;
