@@ -358,11 +358,15 @@ async function handleBlockCommand(message) {
     return;
   }
 
-  const summaryRow = getSummaryMessage(bookingDate);
-  if (!summaryRow) {
-    await message.reply(`找不到 ${date} 這天的討論串，請確認日期是不是在未來 7 天的範圍內。`).catch(() => {});
+  const today = getBookingDateToday();
+  if (bookingDate < today) {
+    await message.reply(`${date} 已經是過去的日期了，沒辦法鎖定。`).catch(() => {});
     return;
   }
+
+  // 討論串還沒建立也沒關係（例如提早鎖定下週五）：鎖定資料本身跟討論串是否存在無關，
+  // 等討論串之後自動建立時，這個時段自然就會是不開放狀態，refreshSummaryMessage 內部
+  // 找不到討論串時本來就會安全地不做任何事
 
   const blockId = insertBlockedSlot({ bookingDate, startTime: start, endTime: end, reason });
 
