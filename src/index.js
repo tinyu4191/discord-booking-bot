@@ -13,6 +13,7 @@ import {
   getBookingsByDate,
   getBlockedSlotsByDate,
   getBlockedSlotById,
+  getAllBlockedSlots,
   insertBlockedSlot,
   deleteBlockedSlot,
   getConfirmedBookingsByDate,
@@ -25,8 +26,11 @@ import {
 import {
   formatGuideText,
   formatThreadTitle,
+  formatDateLabel,
+  getWeekdayLabel,
   getWeekdayIndex,
   getBookingDateToday,
+  getCurrentTimeMinutes,
   addDays,
   timeToMinutes,
   parseBookingMessage,
@@ -327,16 +331,44 @@ async function sendAnnouncement(text, files = []) {
   }
 }
 
-// 管理頻道指令：目前支援「鎖定」「解除鎖定」，其他訊息當一般聊天忽略，不處理也不回覆
+// 管理頻道指令：目前支援「鎖定」「解除鎖定」「查詢鎖定」，其他訊息當一般聊天忽略，不處理也不回覆
 async function handleAdminCommand(message) {
   const commandType = getAdminCommandType(message.content);
   if (!commandType) return;
 
   if (commandType === "block") {
     await handleBlockCommand(message);
-  } else {
+  } else if (commandType === "unblock") {
     await handleUnblockCommand(message);
+  } else {
+    await handleListBlockCommand(message);
   }
+}
+
+// 「查詢鎖定」指令：列出目前所有還有效的鎖定時段與編號，已過期的自動濾掉
+async function handleListBlockCommand(message) {
+  const today = getBookingDateToday();
+  const nowMinutes = getCurrentTimeMinutes();
+
+  const slots = getAllBlockedSlots().filter((s) => {
+    if (s.booking_date > today) return true;
+    if (s.booking_date < today) return false;
+    // 同一天：結束時間還沒過才算有效
+    const endMin = timeToMinutes(s.end_time);
+    return endMin === null || endMin >= nowMinutes;
+  });
+
+  if (!slots.length) {
+    await message.reply("目前沒有任何有效的鎖定時段。").catch(() => {});
+    return;
+  }
+
+  const lines = slots.map((s) => {
+    const reasonText = s.reason ? `｜${s.reason}` : "";
+    return `#${s.id}｜${formatDateLabel(s.booking_date)} (${getWeekdayLabel(s.booking_date)})｜${s.start_time}~${s.end_time}${reasonText}`;
+  });
+
+  await message.reply(`📋 目前有效的鎖定時段：\n${lines.join("\n")}`).catch(() => {});
 }
 
 // 「鎖定」指令：寫入鎖定時段 → 刪除已衝突的預約 → 討論串發公告 tag 受影響的人 → 回覆管理頻道

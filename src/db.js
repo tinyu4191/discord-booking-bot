@@ -171,6 +171,13 @@ export function getBlockedSlotsByDate(bookingDate) {
   `).all(bookingDate);
 }
 
+// 查詢所有鎖定時段（不分日期），過期與否由呼叫端依「現在時間」判斷後過濾
+export function getAllBlockedSlots() {
+  return db.prepare(`
+    SELECT * FROM blocked_slots ORDER BY booking_date, start_time
+  `).all();
+}
+
 export function getBlockedSlotById(id) {
   return db.prepare(`SELECT * FROM blocked_slots WHERE id = ?`).get(id);
 }

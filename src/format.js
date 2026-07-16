@@ -102,6 +102,20 @@ export function buildSummaryEmbed(bookingDate, bookings) {
   return embed;
 }
 
+// 依 Asia/Ho_Chi_Minh 時區取得「現在」的分鐘數（0:00 起算），用來判斷鎖定時段是否已過期
+export function getCurrentTimeMinutes() {
+  const fmt = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Ho_Chi_Minh",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+  const parts = fmt.formatToParts(new Date());
+  const hour = Number(parts.find((p) => p.type === "hour").value);
+  const minute = Number(parts.find((p) => p.type === "minute").value);
+  return hour * 60 + minute;
+}
+
 // 判斷這則留言看起來像不像是要預約（有沒有出現「地點：」或「時間：」關鍵字）
 // 用來過濾掉客服對話、閒聊等一般留言，避免機器人誤判成格式錯誤而亂回覆
 export function isBookingAttempt(content) {
@@ -112,6 +126,7 @@ export function isBookingAttempt(content) {
 export function getAdminCommandType(content) {
   const firstLine = (content || "").trim().split("\n")[0].trim();
   if (/^解除鎖定/.test(firstLine)) return "unblock";
+  if (/^查詢鎖定/.test(firstLine)) return "list";
   if (/^鎖定/.test(firstLine)) return "block";
   return null;
 }
