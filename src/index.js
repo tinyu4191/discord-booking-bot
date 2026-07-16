@@ -151,6 +151,16 @@ function buildWeekdayAttachment(bookingDate) {
   return new AttachmentBuilder(filePath);
 }
 
+// 公告用的固定圖片（例如鎖定時段公告的示意圖），放在 assets/announcements/ 底下
+function buildAnnouncementAttachment(fileName) {
+  const filePath = path.join(process.cwd(), "assets", "announcements", fileName);
+  if (!existsSync(filePath)) {
+    console.warn(`找不到公告圖片：${filePath}（可放進 assets/announcements/ 資料夾，沒放的話公告照樣會發，只是不會附圖）`);
+    return null;
+  }
+  return new AttachmentBuilder(filePath);
+}
+
 async function createDailyThread(parent, bookingDate) {
   const guideText = formatGuideText(bookingDate);
   const attachment = buildWeekdayAttachment(bookingDate);
@@ -304,14 +314,14 @@ async function handleBookingMessage(message, { isEdit }) {
 }
 
 // 把公告推播到獨立的公告頻道（跟討論串分開），並確保 @everyone 真的會 ping 到人
-async function sendAnnouncement(text) {
+async function sendAnnouncement(text, files = []) {
   if (!process.env.ANNOUNCEMENT_CHANNEL_ID) {
     console.warn("沒有設定 ANNOUNCEMENT_CHANNEL_ID，公告訊息略過推播：", text);
     return;
   }
   try {
     const channel = await client.channels.fetch(process.env.ANNOUNCEMENT_CHANNEL_ID);
-    await channel.send({ content: text, allowedMentions: { parse: ["everyone", "users"] } });
+    await channel.send({ content: text, files, allowedMentions: { parse: ["everyone", "users"] } });
   } catch (err) {
     console.warn("公告推播失敗：", err.message);
   }
@@ -375,7 +385,8 @@ async function handleBlockCommand(message) {
     announcement += `\n\n以下預約因為時段衝突已被系統取消，請重新選擇其他時間登記，造成不便請見諒 🙏\n${tags}`;
   }
 
-  await sendAnnouncement(announcement);
+  const lockImage = buildAnnouncementAttachment("lock.png");
+  await sendAnnouncement(announcement, lockImage ? [lockImage] : []);
 
   await message
     .reply(`已鎖定 ${date} ${start}~${end}（編號 #${blockId}），取消了 ${affected.length} 筆衝突的預約。`)
@@ -404,7 +415,11 @@ async function handleUnblockCommand(message) {
 
   const summaryRow = getSummaryMessage(slot.booking_date);
   if (summaryRow) {
-    await sendAnnouncement(`@everyone 📢 公告：${slot.start_time} ~ ${slot.end_time} 這個時段恢復開放預約囉！`);
+    const unlockImage = buildAnnouncementAttachment("unlock.png");
+    await sendAnnouncement(
+      `@everyone 📢 公告：${slot.start_time} ~ ${slot.end_time} 這個時段恢復開放預約囉！`,
+      unlockImage ? [unlockImage] : []
+    );
   }
 
   await logToAdmin(`✅ 已解除鎖定 #${id}（${slot.booking_date} ${slot.start_time}~${slot.end_time}）`);
