@@ -193,7 +193,7 @@ async function createDailyThread(parent, bookingDate) {
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot) return;
 
-  if (message.channelId === process.env.ADMIN_CHANNEL_ID) {
+  if (message.channelId === process.env.MANAGEMENT_CHANNEL_ID) {
     await handleAdminCommand(message);
     return;
   }
