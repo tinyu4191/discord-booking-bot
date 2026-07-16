@@ -69,6 +69,14 @@ export function timeToMinutes(timeStr) {
   return Number(match[1]) * 60 + Number(match[2]);
 }
 
+// 判斷某個時間（分鐘數）是否落在鎖定時段（含頭尾）之內
+export function isWithinBlockedSlot(minutes, slot) {
+  const startMin = timeToMinutes(slot.start_time);
+  const endMin = timeToMinutes(slot.end_time);
+  if (startMin === null || endMin === null) return false;
+  return minutes >= startMin && minutes <= endMin;
+}
+
 // 把當天預約清單做成 embed 卡片，index.js 跟一次性遷移腳本共用這個函式
 export function buildSummaryEmbed(bookingDate, bookings) {
   const title = `📅 ${formatDateLabel(bookingDate)} (${getWeekdayLabel(bookingDate)}) 預約統計`;
@@ -98,6 +106,48 @@ export function buildSummaryEmbed(bookingDate, bookings) {
 // 用來過濾掉客服對話、閒聊等一般留言，避免機器人誤判成格式錯誤而亂回覆
 export function isBookingAttempt(content) {
   return /地點[:：]|時間[:：]/.test(content || "");
+}
+
+// 判斷管理頻道的留言是「鎖定」還是「解除鎖定」指令，第一行不是這兩種開頭就當作一般聊天忽略
+export function getAdminCommandType(content) {
+  const firstLine = (content || "").trim().split("\n")[0].trim();
+  if (/^解除鎖定/.test(firstLine)) return "unblock";
+  if (/^鎖定/.test(firstLine)) return "block";
+  return null;
+}
+
+// 解析「鎖定」指令：日期／開始／結束／原因
+export function parseBlockCommand(content) {
+  const get = (label) => {
+    const re = new RegExp(`${label}[:：]\\s*(.*)`);
+    const m = (content || "").match(re);
+    return m ? m[1].trim() : "";
+  };
+  return {
+    date: get("日期"),
+    start: get("開始"),
+    end: get("結束"),
+    reason: get("原因"),
+  };
+}
+
+// 解析「解除鎖定」指令：編號
+export function parseUnblockCommand(content) {
+  const m = (content || "").match(/編號[:：]\s*(\d+)/);
+  return { id: m ? Number(m[1]) : null };
+}
+
+// 把 "MM/DD" 轉成完整的 YYYY-MM-DD（用今年的年份），格式錯誤回傳 null
+export function parseMMDDToFullDate(input) {
+  const trimmed = (input || "").trim();
+  const match = trimmed.match(/^(\d{1,2})\/(\d{1,2})$/);
+  if (!match) return null;
+
+  const todayStr = getBookingDateToday();
+  const year = Number(todayStr.slice(0, 4));
+  const month = String(Number(match[1])).padStart(2, "0");
+  const day = String(Number(match[2])).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 // 解析使用者在討論串留的固定格式留言

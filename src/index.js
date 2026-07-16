@@ -8,7 +8,12 @@ import {
   getBookingByMessageId,
   updateBookingFromMessage,
   deleteBookingByMessageId,
+  deleteBookingById,
   getBookingsByDate,
+  getBlockedSlotsByDate,
+  getBlockedSlotById,
+  insertBlockedSlot,
+  deleteBlockedSlot,
   getConfirmedBookingsByDate,
   getSummaryMessage,
   getSummaryByThreadId,
@@ -25,6 +30,11 @@ import {
   timeToMinutes,
   parseBookingMessage,
   isBookingAttempt,
+  isWithinBlockedSlot,
+  getAdminCommandType,
+  parseBlockCommand,
+  parseUnblockCommand,
+  parseMMDDToFullDate,
   buildSummaryEmbed,
 } from "./format.js";
 
@@ -182,6 +192,12 @@ async function createDailyThread(parent, bookingDate) {
 
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot) return;
+
+  if (message.channelId === process.env.ADMIN_CHANNEL_ID) {
+    await handleAdminCommand(message);
+    return;
+  }
+
   if (!message.channel.isThread()) return;
   await handleBookingMessage(message, { isEdit: false });
 });
@@ -236,6 +252,18 @@ async function handleBookingMessage(message, { isEdit }) {
   const bookingDate = summaryRow.booking_date;
   const existingBooking = getBookingByMessageId(message.id);
 
+  // 鎖定時段檢查：如果這個時段被設定為不開放預約，直接擋下
+  const blockedSlot = getBlockedSlotsByDate(bookingDate).find((slot) => isWithinBlockedSlot(newMinutes, slot));
+  if (blockedSlot) {
+    await safeReact(message, "🚫");
+    await message
+      .reply(
+        `這個時段（${blockedSlot.start_time} ~ ${blockedSlot.end_time}）目前不開放預約${blockedSlot.reason ? `（原因：${blockedSlot.reason}）` : ""}，請選擇其他時間。`
+      )
+      .catch(() => {});
+    return;
+  }
+
   const conflict = getBookingsByDate(bookingDate).find((b) => {
     if (existingBooking && b.id === existingBooking.id) return false; // 排除自己（編輯情境）
     const mins = timeToMinutes(b.scheduled_time);
@@ -272,6 +300,113 @@ async function handleBookingMessage(message, { isEdit }) {
   await logToAdmin(
     `📋 ${isEdit ? "更新" : "新"}預約｜${bookingDate}｜${location} / ${time} / ${channel || "當日決定"}｜<@${message.author.id}>`
   );
+}
+
+// 把公告推播到獨立的公告頻道（跟討論串分開），並確保 @everyone 真的會 ping 到人
+async function sendAnnouncement(text) {
+  if (!process.env.ANNOUNCEMENT_CHANNEL_ID) {
+    console.warn("沒有設定 ANNOUNCEMENT_CHANNEL_ID，公告訊息略過推播：", text);
+    return;
+  }
+  try {
+    const channel = await client.channels.fetch(process.env.ANNOUNCEMENT_CHANNEL_ID);
+    await channel.send({ content: text, allowedMentions: { parse: ["everyone", "users"] } });
+  } catch (err) {
+    console.warn("公告推播失敗：", err.message);
+  }
+}
+
+// 管理頻道指令：目前支援「鎖定」「解除鎖定」，其他訊息當一般聊天忽略，不處理也不回覆
+async function handleAdminCommand(message) {
+  const commandType = getAdminCommandType(message.content);
+  if (!commandType) return;
+
+  if (commandType === "block") {
+    await handleBlockCommand(message);
+  } else {
+    await handleUnblockCommand(message);
+  }
+}
+
+// 「鎖定」指令：寫入鎖定時段 → 刪除已衝突的預約 → 討論串發公告 tag 受影響的人 → 回覆管理頻道
+async function handleBlockCommand(message) {
+  const { date, start, end, reason } = parseBlockCommand(message.content);
+
+  const bookingDate = parseMMDDToFullDate(date);
+  if (!bookingDate) {
+    await message.reply("日期格式錯誤，請用 MM/DD，例如 07/20。").catch(() => {});
+    return;
+  }
+
+  const startMin = timeToMinutes(start);
+  const endMin = timeToMinutes(end);
+  if (startMin === null || endMin === null || startMin > endMin) {
+    await message
+      .reply("時間格式錯誤，請確認「開始」「結束」都是 HH:MM 24小時制，且開始時間要早於或等於結束時間。")
+      .catch(() => {});
+    return;
+  }
+
+  const summaryRow = getSummaryMessage(bookingDate);
+  if (!summaryRow) {
+    await message.reply(`找不到 ${date} 這天的討論串，請確認日期是不是在未來 7 天的範圍內。`).catch(() => {});
+    return;
+  }
+
+  const blockId = insertBlockedSlot({ bookingDate, startTime: start, endTime: end, reason });
+
+  // 找出這個時段內已經存在的預約，刪除並記錄下來準備通知
+  const affected = getBookingsByDate(bookingDate).filter((b) => {
+    const mins = timeToMinutes(b.scheduled_time);
+    return mins !== null && isWithinBlockedSlot(mins, { start_time: start, end_time: end });
+  });
+
+  for (const b of affected) {
+    deleteBookingById(b.id);
+  }
+
+  await refreshSummaryMessage(bookingDate);
+
+  const reasonText = reason ? `（原因：${reason}）` : "";
+  let announcement = `@everyone 📢 公告：${date} ${start} ~ ${end} 這個時段目前不開放預約${reasonText}。`;
+  if (affected.length) {
+    const tags = affected.map((b) => `<@${b.booker_id}>（原本 ${b.scheduled_time} / ${b.location}）`).join("\n");
+    announcement += `\n\n以下預約因為時段衝突已被系統取消，請重新選擇其他時間登記，造成不便請見諒 🙏\n${tags}`;
+  }
+
+  await sendAnnouncement(announcement);
+
+  await message
+    .reply(`已鎖定 ${date} ${start}~${end}（編號 #${blockId}），取消了 ${affected.length} 筆衝突的預約。`)
+    .catch(() => {});
+  await logToAdmin(`🚫 已鎖定 ${date} ${start}~${end}${reasonText}，取消 ${affected.length} 筆預約`);
+}
+
+// 「解除鎖定」指令：依編號刪除鎖定設定，並在討論串公告恢復開放
+async function handleUnblockCommand(message) {
+  const { id } = parseUnblockCommand(message.content);
+  if (!id) {
+    await message.reply("請附上要解除的編號，例如：\n```\n解除鎖定：\n編號：7\n```").catch(() => {});
+    return;
+  }
+
+  const slot = getBlockedSlotById(id);
+  if (!slot) {
+    await message.reply(`找不到編號 #${id} 的鎖定設定。`).catch(() => {});
+    return;
+  }
+
+  deleteBlockedSlot(id);
+  await message
+    .reply(`已解除鎖定 #${id}（${slot.booking_date} ${slot.start_time}~${slot.end_time}）。`)
+    .catch(() => {});
+
+  const summaryRow = getSummaryMessage(slot.booking_date);
+  if (summaryRow) {
+    await sendAnnouncement(`@everyone 📢 公告：${slot.start_time} ~ ${slot.end_time} 這個時段恢復開放預約囉！`);
+  }
+
+  await logToAdmin(`✅ 已解除鎖定 #${id}（${slot.booking_date} ${slot.start_time}~${slot.end_time}）`);
 }
 
 async function safeReact(message, emoji) {
