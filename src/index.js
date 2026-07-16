@@ -9,6 +9,7 @@ import {
   updateBookingFromMessage,
   deleteBookingByMessageId,
   deleteBookingById,
+  cancelBookingById,
   getBookingsByDate,
   getBlockedSlotsByDate,
   getBlockedSlotById,
@@ -362,7 +363,7 @@ async function handleBlockCommand(message) {
   });
 
   for (const b of affected) {
-    deleteBookingById(b.id);
+    cancelBookingById(b.id);
   }
 
   await refreshSummaryMessage(bookingDate);

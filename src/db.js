@@ -81,6 +81,25 @@ export function deleteBookingById(id) {
   db.prepare(`DELETE FROM bookings WHERE id = ?`).run(id);
 }
 
+// 軟刪除：狀態改成 cancelled，資料還在、不會顯示在班表上，之後可以復原
+export function cancelBookingById(id) {
+  db.prepare(`UPDATE bookings SET status = 'cancelled' WHERE id = ?`).run(id);
+}
+
+// 復原：把 cancelled 的預約狀態改回 confirmed，重新出現在班表上
+export function restoreBookingById(id) {
+  db.prepare(`UPDATE bookings SET status = 'confirmed' WHERE id = ?`).run(id);
+}
+
+// 查某天所有被取消（軟刪除）的預約，方便找出要復原的 id
+export function getCancelledBookingsByDate(bookingDate) {
+  return db.prepare(`
+    SELECT * FROM bookings
+    WHERE booking_date = ? AND status = 'cancelled'
+    ORDER BY scheduled_time ASC, id ASC
+  `).all(bookingDate);
+}
+
 export function updateBookingFromMessage(messageId, { location, time, channel, proxyFor }) {
   db.prepare(`
     UPDATE bookings SET location = ?, scheduled_time = ?, channel = ?, proxy_for = ?
