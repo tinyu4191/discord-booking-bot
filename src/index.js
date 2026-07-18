@@ -172,6 +172,14 @@ function buildAnnouncementAttachment(fileName) {
   return new AttachmentBuilder(filePath);
 }
 
+// 依鎖定原因挑選公告要附的圖片：原因裡有「出征蝴蝶王」就換成專屬圖，其他一律用預設的 lock.png
+// reasons 可以是單一原因字串，也可以是一組原因（多筆鎖定同時公告時，只要其中一個符合就換圖）
+function pickLockAnnouncementImage(reasons) {
+  const reasonList = Array.isArray(reasons) ? reasons : [reasons];
+  const isButterflyKing = reasonList.some((r) => r && r.includes("出征蝴蝶王"));
+  return buildAnnouncementAttachment(isButterflyKing ? "butterfly-king.png" : "lock.png");
+}
+
 async function createDailyThread(parent, bookingDate) {
   const guideText = formatGuideText(bookingDate);
   const attachment = buildWeekdayAttachment(bookingDate);
@@ -226,7 +234,7 @@ async function announceBlockedSlotsForNewThread(bookingDate) {
     .map((s) => `🚫 ${s.start_time} ~ ${s.end_time}${s.reason ? `（原因：${s.reason}）` : ""}`);
 
   const announcement = `@everyone 📢 ${formatThreadTitle(bookingDate)} 已開放，以下時段目前不開放預約：\n${lines.join("\n")}`;
-  const lockImage = buildAnnouncementAttachment("lock.png");
+  const lockImage = pickLockAnnouncementImage(allSlots.map((s) => s.reason));
   await sendAnnouncement(announcement, lockImage ? [lockImage] : []);
 }
 
@@ -479,7 +487,7 @@ async function handleRecurringBlockCommand(message) {
     const announcement =
       `@everyone 📢 公告：每週${weekdayLabel} ${start} ~ ${end} 這個時段固定不開放預約${reasonText}。\n\n` +
       `以下預約因為時段衝突已被系統取消，請重新選擇其他時間登記，造成不便請見諒 🙏\n${lines.join("\n")}`;
-    const lockImage = buildAnnouncementAttachment("lock.png");
+    const lockImage = pickLockAnnouncementImage(reason);
     await sendAnnouncement(announcement, lockImage ? [lockImage] : []);
   }
   // 沒有任何預約受影響時不主動公告，等對應日期的討論串建立時再一併公告（見 announceBlockedSlotsForNewThread）
@@ -569,7 +577,7 @@ async function handleBlockCommand(message) {
     const announcement =
       `@everyone 📢 公告：${date} ${start} ~ ${end} 這個時段目前不開放預約${reasonText}。\n\n` +
       `以下預約因為時段衝突已被系統取消，請重新選擇其他時間登記，造成不便請見諒 🙏\n${tags}`;
-    const lockImage = buildAnnouncementAttachment("lock.png");
+    const lockImage = pickLockAnnouncementImage(reason);
     await sendAnnouncement(announcement, lockImage ? [lockImage] : []);
   }
   // 沒有任何預約受影響時不主動公告，等這一天的討論串建立時再一併公告（見 announceBlockedSlotsForNewThread）
