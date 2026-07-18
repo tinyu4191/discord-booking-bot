@@ -122,11 +122,14 @@ export function isBookingAttempt(content) {
   return /地點[:：]|時間[:：]/.test(content || "");
 }
 
-// 判斷管理頻道的留言是「鎖定」還是「解除鎖定」指令，第一行不是這兩種開頭就當作一般聊天忽略
+// 判斷管理頻道的留言是哪一種指令，第一行不是這幾種開頭就當作一般聊天忽略
 export function getAdminCommandType(content) {
   const firstLine = (content || "").trim().split("\n")[0].trim();
+  if (/^解除週期鎖定/.test(firstLine)) return "unblock_recurring";
   if (/^解除鎖定/.test(firstLine)) return "unblock";
+  if (/^查詢週期鎖定/.test(firstLine)) return "list_recurring";
   if (/^查詢鎖定/.test(firstLine)) return "list";
+  if (/^週期鎖定/.test(firstLine)) return "block_recurring";
   if (/^鎖定/.test(firstLine)) return "block";
   return null;
 }
@@ -150,6 +153,33 @@ export function parseBlockCommand(content) {
 export function parseUnblockCommand(content) {
   const m = (content || "").match(/編號[:：]\s*(\d+)/);
   return { id: m ? Number(m[1]) : null };
+}
+
+// 解析「週期鎖定」指令：星期／開始／結束／原因
+export function parseRecurringBlockCommand(content) {
+  const get = (label) => {
+    const re = new RegExp(`${label}[:：]\\s*(.*)`);
+    const m = (content || "").match(re);
+    return m ? m[1].trim() : "";
+  };
+  return {
+    weekdayInput: get("星期"),
+    start: get("開始"),
+    end: get("結束"),
+    reason: get("原因"),
+  };
+}
+
+// 把使用者輸入的星期（日一二三四五六 / 星期五 / 週五 / 0~6）轉成 0=週日...6=週六，格式錯誤回傳 null
+export function parseWeekdayInput(input) {
+  const trimmed = (input || "").trim().replace(/^(星期|週|周)/, "");
+  const chars = "日一二三四五六";
+  const idx = chars.indexOf(trimmed);
+  if (idx !== -1) return idx;
+
+  const num = Number(trimmed);
+  if (!Number.isNaN(num) && Number.isInteger(num) && num >= 0 && num <= 6) return num;
+  return null;
 }
 
 // 把 "MM/DD" 轉成完整的 YYYY-MM-DD（用今年的年份），格式錯誤回傳 null

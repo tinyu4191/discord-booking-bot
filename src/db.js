@@ -43,6 +43,18 @@ db.exec(`
   )
 `);
 
+// 記錄「每週固定星期幾的某個時段」不開放預約（例如每週五晚上固定休息）
+db.exec(`
+  CREATE TABLE IF NOT EXISTS recurring_blocked_slots (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    weekday    INTEGER NOT NULL,  -- 0=週日 ... 6=週六
+    start_time TEXT NOT NULL,
+    end_time   TEXT NOT NULL,
+    reason     TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )
+`);
+
 export function insertBooking({ guildId, bookingDate, messageId, location, time, channel, bookerId, proxyFor }) {
   const stmt = db.prepare(`
     INSERT INTO bookings (guild_id, booking_date, message_id, location, scheduled_time, channel, booker_id, proxy_for)
@@ -184,6 +196,37 @@ export function getBlockedSlotById(id) {
 
 export function deleteBlockedSlot(id) {
   db.prepare(`DELETE FROM blocked_slots WHERE id = ?`).run(id);
+}
+
+// ---- 週期鎖定（每週固定星期幾的某時段不開放）----
+
+export function insertRecurringBlockedSlot({ weekday, startTime, endTime, reason }) {
+  const stmt = db.prepare(`
+    INSERT INTO recurring_blocked_slots (weekday, start_time, end_time, reason)
+    VALUES (?, ?, ?, ?)
+  `);
+  const result = stmt.run(weekday, startTime, endTime, reason || null);
+  return result.lastInsertRowid;
+}
+
+export function getRecurringBlockedSlotsByWeekday(weekday) {
+  return db.prepare(`
+    SELECT * FROM recurring_blocked_slots WHERE weekday = ? ORDER BY start_time
+  `).all(weekday);
+}
+
+export function getAllRecurringBlockedSlots() {
+  return db.prepare(`
+    SELECT * FROM recurring_blocked_slots ORDER BY weekday, start_time
+  `).all();
+}
+
+export function getRecurringBlockedSlotById(id) {
+  return db.prepare(`SELECT * FROM recurring_blocked_slots WHERE id = ?`).get(id);
+}
+
+export function deleteRecurringBlockedSlot(id) {
+  db.prepare(`DELETE FROM recurring_blocked_slots WHERE id = ?`).run(id);
 }
 
 export default db;

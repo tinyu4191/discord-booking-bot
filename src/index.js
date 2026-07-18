@@ -16,6 +16,11 @@ import {
   getAllBlockedSlots,
   insertBlockedSlot,
   deleteBlockedSlot,
+  getRecurringBlockedSlotsByWeekday,
+  getAllRecurringBlockedSlots,
+  getRecurringBlockedSlotById,
+  insertRecurringBlockedSlot,
+  deleteRecurringBlockedSlot,
   getConfirmedBookingsByDate,
   getSummaryMessage,
   getSummaryByThreadId,
@@ -38,6 +43,8 @@ import {
   isWithinBlockedSlot,
   getAdminCommandType,
   parseBlockCommand,
+  parseRecurringBlockCommand,
+  parseWeekdayInput,
   parseUnblockCommand,
   parseMMDDToFullDate,
   buildSummaryEmbed,
@@ -203,6 +210,24 @@ async function createDailyThread(parent, bookingDate) {
   setSummaryMessage(bookingDate, thread.id, statsMsg.id);
   console.log(`已建立討論串：${bookingDate}`);
   await logToAdmin(`🧵 已建立討論串：${formatThreadTitle(bookingDate)}`);
+
+  await announceBlockedSlotsForNewThread(bookingDate);
+}
+
+// 討論串一建立，掃描當天有沒有一次性或週期鎖定，有的話同步公告（跟排程時設定鎖定的時間點脫鉤）
+async function announceBlockedSlotsForNewThread(bookingDate) {
+  const weekday = getWeekdayIndex(bookingDate);
+  const allSlots = [...getBlockedSlotsByDate(bookingDate), ...getRecurringBlockedSlotsByWeekday(weekday)];
+  if (!allSlots.length) return;
+
+  const lines = allSlots
+    .slice()
+    .sort((a, b) => timeToMinutes(a.start_time) - timeToMinutes(b.start_time))
+    .map((s) => `🚫 ${s.start_time} ~ ${s.end_time}${s.reason ? `（原因：${s.reason}）` : ""}`);
+
+  const announcement = `@everyone 📢 ${formatThreadTitle(bookingDate)} 已開放，以下時段目前不開放預約：\n${lines.join("\n")}`;
+  const lockImage = buildAnnouncementAttachment("lock.png");
+  await sendAnnouncement(announcement, lockImage ? [lockImage] : []);
 }
 
 client.on(Events.MessageCreate, async (message) => {
@@ -267,8 +292,11 @@ async function handleBookingMessage(message, { isEdit }) {
   const bookingDate = summaryRow.booking_date;
   const existingBooking = getBookingByMessageId(message.id);
 
-  // 鎖定時段檢查：如果這個時段被設定為不開放預約，直接擋下
-  const blockedSlot = getBlockedSlotsByDate(bookingDate).find((slot) => isWithinBlockedSlot(newMinutes, slot));
+  // 鎖定時段檢查：如果這個時段被設定為不開放預約（一次性或每週固定），直接擋下
+  const weekday = getWeekdayIndex(bookingDate);
+  const blockedSlot =
+    getBlockedSlotsByDate(bookingDate).find((slot) => isWithinBlockedSlot(newMinutes, slot)) ||
+    getRecurringBlockedSlotsByWeekday(weekday).find((slot) => isWithinBlockedSlot(newMinutes, slot));
   if (blockedSlot) {
     await safeReact(message, "🚫");
     await message
@@ -331,7 +359,8 @@ async function sendAnnouncement(text, files = []) {
   }
 }
 
-// 管理頻道指令：目前支援「鎖定」「解除鎖定」「查詢鎖定」，其他訊息當一般聊天忽略，不處理也不回覆
+// 管理頻道指令：一次性鎖定「鎖定/解除鎖定/查詢鎖定」+ 週期鎖定「週期鎖定/解除週期鎖定/查詢週期鎖定」
+// 其他訊息當一般聊天忽略，不處理也不回覆
 async function handleAdminCommand(message) {
   const commandType = getAdminCommandType(message.content);
   if (!commandType) return;
@@ -340,8 +369,14 @@ async function handleAdminCommand(message) {
     await handleBlockCommand(message);
   } else if (commandType === "unblock") {
     await handleUnblockCommand(message);
-  } else {
+  } else if (commandType === "list") {
     await handleListBlockCommand(message);
+  } else if (commandType === "block_recurring") {
+    await handleRecurringBlockCommand(message);
+  } else if (commandType === "unblock_recurring") {
+    await handleRecurringUnblockCommand(message);
+  } else {
+    await handleRecurringListCommand(message);
   }
 }
 
@@ -369,6 +404,120 @@ async function handleListBlockCommand(message) {
   });
 
   await message.reply(`📋 目前有效的鎖定時段：\n${lines.join("\n")}`).catch(() => {});
+}
+
+// 「查詢週期鎖定」指令：列出所有每週固定的鎖定設定
+async function handleRecurringListCommand(message) {
+  const slots = getAllRecurringBlockedSlots();
+  if (!slots.length) {
+    await message.reply("目前沒有任何週期鎖定設定。").catch(() => {});
+    return;
+  }
+
+  const weekdayChars = "日一二三四五六";
+  const lines = slots.map((s) => {
+    const reasonText = s.reason ? `｜${s.reason}` : "";
+    return `#${s.id}｜每週${weekdayChars[s.weekday]}｜${s.start_time}~${s.end_time}${reasonText}`;
+  });
+
+  await message.reply(`📋 目前的週期鎖定設定：\n${lines.join("\n")}`).catch(() => {});
+}
+
+// 「週期鎖定」指令：寫入每週固定鎖定 → 掃描未來7天內已存在且符合星期的預約，取消衝突的 → 公告 → 回覆管理頻道
+async function handleRecurringBlockCommand(message) {
+  const { weekdayInput, start, end, reason } = parseRecurringBlockCommand(message.content);
+
+  const weekday = parseWeekdayInput(weekdayInput);
+  if (weekday === null) {
+    await message
+      .reply("星期格式錯誤，請填「日一二三四五六」其中一個字（例如「五」代表星期五），或 0~6 的數字（0=週日）。")
+      .catch(() => {});
+    return;
+  }
+
+  const startMin = timeToMinutes(start);
+  const endMin = timeToMinutes(end);
+  if (startMin === null || endMin === null || startMin > endMin) {
+    await message
+      .reply("時間格式錯誤，請確認「開始」「結束」都是 HH:MM 24小時制，且開始時間要早於或等於結束時間。")
+      .catch(() => {});
+    return;
+  }
+
+  const blockId = insertRecurringBlockedSlot({ weekday, startTime: start, endTime: end, reason });
+
+  // 掃描目前已存在討論串的未來 7 天內，把符合這個星期幾、時間衝突的預約取消
+  const today = getBookingDateToday();
+  const affectedGroups = [];
+  for (let i = 0; i <= 6; i++) {
+    const date = addDays(today, i);
+    if (getWeekdayIndex(date) !== weekday) continue;
+
+    const affected = getBookingsByDate(date).filter((b) => {
+      const mins = timeToMinutes(b.scheduled_time);
+      return mins !== null && isWithinBlockedSlot(mins, { start_time: start, end_time: end });
+    });
+
+    for (const b of affected) {
+      cancelBookingById(b.id);
+    }
+
+    if (affected.length) {
+      await refreshSummaryMessage(date);
+      affectedGroups.push({ date, bookings: affected });
+    }
+  }
+
+  const weekdayLabel = "日一二三四五六"[weekday];
+  const reasonText = reason ? `（原因：${reason}）` : "";
+  const totalAffected = affectedGroups.reduce((sum, g) => sum + g.bookings.length, 0);
+
+  if (totalAffected) {
+    const lines = affectedGroups.flatMap((g) =>
+      g.bookings.map((b) => `<@${b.booker_id}>（${formatDateLabel(g.date)} ${b.scheduled_time} / ${b.location}）`)
+    );
+    const announcement =
+      `@everyone 📢 公告：每週${weekdayLabel} ${start} ~ ${end} 這個時段固定不開放預約${reasonText}。\n\n` +
+      `以下預約因為時段衝突已被系統取消，請重新選擇其他時間登記，造成不便請見諒 🙏\n${lines.join("\n")}`;
+    const lockImage = buildAnnouncementAttachment("lock.png");
+    await sendAnnouncement(announcement, lockImage ? [lockImage] : []);
+  }
+  // 沒有任何預約受影響時不主動公告，等對應日期的討論串建立時再一併公告（見 announceBlockedSlotsForNewThread）
+
+  await message
+    .reply(`已設定每週${weekdayLabel} ${start}~${end} 固定鎖定（編號 #${blockId}），取消了 ${totalAffected} 筆衝突的預約。`)
+    .catch(() => {});
+  await logToAdmin(`🚫 已設定週期鎖定：每週${weekdayLabel} ${start}~${end}${reasonText}，取消 ${totalAffected} 筆預約`);
+}
+
+// 「解除週期鎖定」指令：依編號刪除週期鎖定，並公告恢復開放
+async function handleRecurringUnblockCommand(message) {
+  const { id } = parseUnblockCommand(message.content);
+  if (!id) {
+    await message.reply("請附上要解除的編號，例如：\n```\n解除週期鎖定：\n編號：3\n```").catch(() => {});
+    return;
+  }
+
+  const slot = getRecurringBlockedSlotById(id);
+  if (!slot) {
+    await message.reply(`找不到編號 #${id} 的週期鎖定設定。`).catch(() => {});
+    return;
+  }
+
+  deleteRecurringBlockedSlot(id);
+  const weekdayLabel = "日一二三四五六"[slot.weekday];
+
+  await message
+    .reply(`已解除每週${weekdayLabel} ${slot.start_time}~${slot.end_time} 的固定鎖定（編號 #${id}）。`)
+    .catch(() => {});
+
+  const unlockImage = buildAnnouncementAttachment("unlock.png");
+  await sendAnnouncement(
+    `@everyone 📢 公告：每週${weekdayLabel} ${slot.start_time} ~ ${slot.end_time} 恢復開放預約囉！`,
+    unlockImage ? [unlockImage] : []
+  );
+
+  await logToAdmin(`✅ 已解除週期鎖定 #${id}（每週${weekdayLabel} ${slot.start_time}~${slot.end_time}）`);
 }
 
 // 「鎖定」指令：寫入鎖定時段 → 刪除已衝突的預約 → 討論串發公告 tag 受影響的人 → 回覆管理頻道
@@ -415,14 +564,15 @@ async function handleBlockCommand(message) {
   await refreshSummaryMessage(bookingDate);
 
   const reasonText = reason ? `（原因：${reason}）` : "";
-  let announcement = `@everyone 📢 公告：${date} ${start} ~ ${end} 這個時段目前不開放預約${reasonText}。`;
   if (affected.length) {
     const tags = affected.map((b) => `<@${b.booker_id}>（原本 ${b.scheduled_time} / ${b.location}）`).join("\n");
-    announcement += `\n\n以下預約因為時段衝突已被系統取消，請重新選擇其他時間登記，造成不便請見諒 🙏\n${tags}`;
+    const announcement =
+      `@everyone 📢 公告：${date} ${start} ~ ${end} 這個時段目前不開放預約${reasonText}。\n\n` +
+      `以下預約因為時段衝突已被系統取消，請重新選擇其他時間登記，造成不便請見諒 🙏\n${tags}`;
+    const lockImage = buildAnnouncementAttachment("lock.png");
+    await sendAnnouncement(announcement, lockImage ? [lockImage] : []);
   }
-
-  const lockImage = buildAnnouncementAttachment("lock.png");
-  await sendAnnouncement(announcement, lockImage ? [lockImage] : []);
+  // 沒有任何預約受影響時不主動公告，等這一天的討論串建立時再一併公告（見 announceBlockedSlotsForNewThread）
 
   await message
     .reply(`已鎖定 ${date} ${start}~${end}（編號 #${blockId}），取消了 ${affected.length} 筆衝突的預約。`)
