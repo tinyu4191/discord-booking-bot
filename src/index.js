@@ -2,6 +2,8 @@ import "dotenv/config";
 import { Client, GatewayIntentBits, Partials, Events, ChannelType, AttachmentBuilder } from "discord.js";
 import cron from "node-cron";
 import { existsSync } from "node:fs";
+import fs from "node:fs";
+import http from "node:http";
 import path from "node:path";
 import {
   insertBooking,
@@ -739,5 +741,42 @@ async function refreshSummaryMessage(bookingDate) {
     await msg.pin().catch((err) => console.warn("置頂失敗（可能缺少 Manage Messages 權限）：", err.message));
   }
 }
+
+// 輕量靜態檔案伺服器：讓 reports/report.html 可以直接用瀏覽器連線查看，不用每次下載
+// 只服務 reports/ 資料夾底下的檔案，不會暴露專案其他部分
+function startReportsServer() {
+  const port = Number(process.env.REPORTS_SERVER_PORT) || 8080;
+  const reportsDir = path.join(process.cwd(), "reports");
+
+  const mimeTypes = { ".html": "text/html; charset=utf-8", ".json": "application/json; charset=utf-8" };
+
+  http
+    .createServer((req, res) => {
+      const urlPath = req.url === "/" ? "/report.html" : req.url;
+      const filePath = path.join(reportsDir, path.normalize(urlPath).replace(/^(\.\.[/\\])+/, ""));
+
+      if (!filePath.startsWith(reportsDir)) {
+        res.writeHead(403);
+        res.end("Forbidden");
+        return;
+      }
+
+      fs.readFile(filePath, (err, data) => {
+        if (err) {
+          res.writeHead(404);
+          res.end("Not found");
+          return;
+        }
+        const ext = path.extname(filePath);
+        res.writeHead(200, { "Content-Type": mimeTypes[ext] || "application/octet-stream" });
+        res.end(data);
+      });
+    })
+    .listen(port, () => {
+      console.log(`週報告網頁伺服器已啟動：http://<VM對外IP>:${port}/report.html`);
+    });
+}
+
+startReportsServer();
 
 client.login(process.env.DISCORD_TOKEN);

@@ -66,7 +66,18 @@ export function saveReport(report) {
   if (!fs.existsSync(REPORTS_DIR)) fs.mkdirSync(REPORTS_DIR, { recursive: true });
   const filePath = path.join(REPORTS_DIR, `${report.weekStart}_${report.weekEnd}.json`);
   fs.writeFileSync(filePath, JSON.stringify(report, null, 2), "utf-8");
+  rebuildIndex();
   return filePath;
+}
+
+// 重新掃描 reports/ 底下所有週報告，彙整成單一索引檔 all-reports.json，
+// 給 report.html 在瀏覽器打開當下用 fetch() 讀取，這樣 HTML 本身完全不用重新產生
+function rebuildIndex() {
+  const files = listReportFiles();
+  const all = files
+    .map((f) => JSON.parse(fs.readFileSync(path.join(REPORTS_DIR, f), "utf-8")))
+    .sort((a, b) => (a.weekStart < b.weekStart ? -1 : 1));
+  fs.writeFileSync(path.join(REPORTS_DIR, "all-reports.json"), JSON.stringify(all), "utf-8");
 }
 
 export function loadReport(weekStart, weekEnd) {
@@ -79,6 +90,6 @@ export function listReportFiles() {
   if (!fs.existsSync(REPORTS_DIR)) return [];
   return fs
     .readdirSync(REPORTS_DIR)
-    .filter((f) => f.endsWith(".json"))
+    .filter((f) => f.endsWith(".json") && f !== "all-reports.json")
     .sort();
 }

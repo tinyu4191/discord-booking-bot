@@ -1,25 +1,17 @@
-// 把 reports/ 資料夾裡所有的週報告 JSON，整合成一個互動式的 HTML 報告（reports/report.html）
-// 網頁裡可以用下拉選單切換任一週，畫面固定顯示「選到的那週 vs 前一週」的比較
-// 用瀏覽器打開即可，不需要另外架網頁伺服器
+// 產生一份「靜態」的互動式 HTML 報告檢視器（reports/report.html）
+// 這支腳本只需要跑一次（或想改樣式時再跑），之後不需要每週重跑——
+// report.html 本身在瀏覽器打開時，會用 fetch() 動態讀取同資料夾裡的 all-reports.json，
+// 永遠反映 reports/ 資料夾目前的最新內容（all-reports.json 由 saveReport() 自動維護）
 //
 // 用法：node scripts/generate-html-report.js
 
 import fs from "node:fs";
 import path from "node:path";
-import { listReportFiles } from "../src/report.js";
 
 const REPORTS_DIR = path.join(process.cwd(), "reports");
 const OUTPUT_PATH = path.join(REPORTS_DIR, "report.html");
 
-const files = listReportFiles();
-if (!files.length) {
-  console.error("reports/ 資料夾裡沒有任何週報告，先跑 node scripts/generate-weekly-report.js 產生至少一份。");
-  process.exit(1);
-}
-
-const reports = files
-  .map((f) => JSON.parse(fs.readFileSync(path.join(REPORTS_DIR, f), "utf-8")))
-  .sort((a, b) => (a.weekStart < b.weekStart ? -1 : 1));
+if (!fs.existsSync(REPORTS_DIR)) fs.mkdirSync(REPORTS_DIR, { recursive: true });
 
 const html = `<!DOCTYPE html>
 <html lang="zh-Hant">
@@ -46,62 +38,47 @@ const html = `<!DOCTYPE html>
   .up { color: #1baf7a; }
   .down { color: #e34948; }
   .muted { color: #666; font-size: 13px; }
-  .legend { display: flex; gap: 16px; font-size: 12px; color: #555; margin-top: 4px; }
-  .legend span { display: inline-flex; align-items: center; gap: 4px; }
-  .dot { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+  #loadError { color: #e34948; display: none; }
 </style>
 </head>
 <body>
 
 <h1>📊 預約統計週報告</h1>
-<p class="muted">產生時間：${new Date().toLocaleString("zh-TW", { timeZone: "Asia/Ho_Chi_Minh" })}（每週定義：週四~下週三）</p>
+<p class="muted" id="generatedAt"></p>
+<p id="loadError">找不到 all-reports.json，請先跑過至少一次 <code>node scripts/generate-weekly-report.js</code>。</p>
 
-<label for="weekSelect"><strong>選擇要查看的週：</strong></label><br/>
-<select id="weekSelect"></select>
+<div id="reportRoot" style="display:none;">
+  <label for="weekSelect"><strong>選擇要查看的週：</strong></label><br/>
+  <select id="weekSelect"></select>
 
-<div id="incompleteWarning" class="warn" style="display:none;"></div>
+  <div id="incompleteWarning" class="warn" style="display:none;"></div>
 
-<h2>總覽指標</h2>
-<div class="grid4" id="metricCards"></div>
+  <h2>總覽指標</h2>
+  <div class="grid4" id="metricCards"></div>
 
-<h2>逐日場次（本週 vs 上週，依星期對齊）</h2>
-<div class="chart-wrap"><canvas id="dailyChart"></canvas></div>
+  <h2>逐日場次（本週 vs 上週，依星期對齊）</h2>
+  <div class="chart-wrap"><canvas id="dailyChart"></canvas></div>
 
-<h2>時段分佈（本週 vs 上週）</h2>
-<div class="chart-wrap"><canvas id="hourChart"></canvas></div>
+  <h2>時段分佈（本週 vs 上週）</h2>
+  <div class="chart-wrap"><canvas id="hourChart"></canvas></div>
 
-<h2>地圖分佈</h2>
-<div class="grid2">
-  <div class="chart-wrap"><canvas id="locChartCurrent"></canvas></div>
-  <div class="chart-wrap"><canvas id="locChartPrev"></canvas></div>
+  <h2>地圖分佈</h2>
+  <div class="grid2">
+    <div class="chart-wrap"><canvas id="locChartCurrent"></canvas></div>
+    <div class="chart-wrap"><canvas id="locChartPrev"></canvas></div>
+  </div>
+
+  <h2>所有週總覽</h2>
+  <table id="overviewTable"></table>
 </div>
 
-<h2>所有週總覽</h2>
-<table>
-  <tr><th>週次</th><th>總場次</th><th>取消</th><th>代約比例</th><th>有資料天數</th></tr>
-  ${reports
-    .map(
-      (r) => `<tr>
-    <td>${r.weekLabel}</td>
-    <td>${r.totalConfirmed}</td>
-    <td>${r.totalCancelled}</td>
-    <td>${(r.proxyRatio * 100).toFixed(1)}%</td>
-    <td>${r.daysWithData} / 7 ${r.daysWithData < 7 ? '<span class="warn">⚠️ 不完整</span>' : ""}</td>
-  </tr>`
-    )
-    .join("\n")}
-</table>
-
 <script>
-const reports = ${JSON.stringify(reports)};
 const weekdayNames = ["週四","週五","週六","週日","週一","週二","週三"];
 const blue = "#2a78d6";
-const blueLight = "rgba(42,120,214,0.4)";
-const gray = "#b0b0b0";
 const grayLight = "rgba(176,176,176,0.4)";
 const colors = ["#2a78d6","#eb6834","#898781","#1baf7a","#e87ba4"];
 
-let dailyChart, hourChart, locChartCurrent, locChartPrev;
+let dailyChart, hourChart, locChartCurrent, locChartPrev, reports = [];
 
 function fmtPct(n) { return (n * 100).toFixed(1) + "%"; }
 
@@ -185,16 +162,49 @@ function render(index) {
   }
 }
 
-const select = document.getElementById("weekSelect");
-reports.forEach((r, i) => {
-  const opt = document.createElement("option");
-  opt.value = i;
-  opt.textContent = r.weekLabel + (r.daysWithData < 7 ? "（資料不完整）" : "") + (i === reports.length - 1 ? "（最新）" : "");
-  select.appendChild(opt);
-});
-select.value = reports.length - 1;
-select.addEventListener("change", () => render(Number(select.value)));
-render(reports.length - 1);
+async function init() {
+  let data;
+  try {
+    const res = await fetch("all-reports.json", { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    data = await res.json();
+  } catch (err) {
+    document.getElementById("loadError").style.display = "block";
+    return;
+  }
+
+  if (!data.length) {
+    document.getElementById("loadError").style.display = "block";
+    return;
+  }
+
+  reports = data;
+  document.getElementById("reportRoot").style.display = "block";
+  document.getElementById("generatedAt").textContent =
+    "頁面載入時間：" + new Date().toLocaleString("zh-TW") + "（每週定義：週四~下週三，資料即時讀取 all-reports.json）";
+
+  const select = document.getElementById("weekSelect");
+  reports.forEach((r, i) => {
+    const opt = document.createElement("option");
+    opt.value = i;
+    opt.textContent = r.weekLabel + (r.daysWithData < 7 ? "（資料不完整）" : "") + (i === reports.length - 1 ? "（最新）" : "");
+    select.appendChild(opt);
+  });
+  select.value = reports.length - 1;
+  select.addEventListener("change", () => render(Number(select.value)));
+
+  document.getElementById("overviewTable").innerHTML =
+    "<tr><th>週次</th><th>總場次</th><th>取消</th><th>代約比例</th><th>有資料天數</th></tr>" +
+    reports.map((r) =>
+      "<tr><td>" + r.weekLabel + "</td><td>" + r.totalConfirmed + "</td><td>" + r.totalCancelled + "</td><td>" +
+      fmtPct(r.proxyRatio) + "</td><td>" + r.daysWithData + " / 7 " +
+      (r.daysWithData < 7 ? '<span class="warn">⚠️ 不完整</span>' : "") + "</td></tr>"
+    ).join("");
+
+  render(reports.length - 1);
+}
+
+init();
 </script>
 
 </body>
@@ -202,5 +212,5 @@ render(reports.length - 1);
 `;
 
 fs.writeFileSync(OUTPUT_PATH, html, "utf-8");
-console.log(`已產生 HTML 報告：${OUTPUT_PATH}`);
-console.log(`共整合 ${reports.length} 週的資料，可以用瀏覽器內建的「下載檔案」功能把它抓到本機打開。`);
+console.log(`已產生靜態 HTML 報告檢視器：${OUTPUT_PATH}`);
+console.log(`這支腳本之後不用每週重跑，report.html 打開時會自動讀取最新的 all-reports.json。`);
