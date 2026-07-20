@@ -10,8 +10,9 @@ bookings.db-journal
 bookings.db-wal
 bookings.db-shm
 
-# 週報告快照（執行期產生的資料，不是原始碼，不該進版控）
-reports/
+# 週報告快照（JSON 資料不進版控，但 HTML 報告要進版控方便查看）
+reports/*.json
+!reports/report.html
 
 # npm 相關
 package-lock.json.bak
