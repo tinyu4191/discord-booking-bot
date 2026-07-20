@@ -10,6 +10,7 @@ const REPORTS_DIR = path.join(process.cwd(), "reports");
 function normalizeLocation(location) {
   if (location.startsWith("龍王")) return "龍王";
   if (location.startsWith("蝴蝶")) return "蝴蝶";
+  if (location.includes("道場")) return "道場"; // 涵蓋「道場」「武陵道場」等變體
   return "其他";
 }
 
