@@ -30,6 +30,7 @@ import {
   getUnlockedPastSummaries,
   markSummaryLocked,
 } from "./db.js";
+import { generateWeeklyReport, saveReport } from "./report.js";
 import {
   formatGuideText,
   formatThreadTitle,
@@ -74,6 +75,24 @@ client.once(Events.ClientReady, async () => {
     async () => {
       await ensureUpcomingThreads();
       await lockPastThreads();
+    },
+    { timezone: "Asia/Ho_Chi_Minh" }
+  );
+
+  // 每週四凌晨（新的一週剛開始時）自動產生「剛結束的上一週」統計報告
+  cron.schedule(
+    "15 0 * * 4",
+    () => {
+      try {
+        const today = getBookingDateToday();
+        const { start: currentWeekStart } = getGameWeekRange(today);
+        const lastWeekStart = addDays(currentWeekStart, -7);
+        const report = generateWeeklyReport(lastWeekStart);
+        const filePath = saveReport(report);
+        console.log(`已自動產生上週報告：${filePath}（${report.totalConfirmed} 場）`);
+      } catch (err) {
+        console.error("自動產生週報告失敗：", err);
+      }
     },
     { timezone: "Asia/Ho_Chi_Minh" }
   );

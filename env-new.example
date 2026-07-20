@@ -1,0 +1,6 @@
+# 從 Discord Developer Portal 取得
+DISCORD_TOKEN=你的機器人Token
+
+# 注意：BOOKING_PARENT_CHANNEL_ID / ADMIN_CHANNEL_ID / MANAGEMENT_CHANNEL_ID / ANNOUNCEMENT_CHANNEL_ID
+# 這四個頻道設定已經改成存在資料庫的 guild_settings 表裡（每個語音群各自一份），
+# 不再從這裡讀取。新增/修改語音群設定請用 scripts/add-guild.js，詳見 MULTI-GUILD.md

@@ -10,6 +10,9 @@ bookings.db-journal
 bookings.db-wal
 bookings.db-shm
 
+# 週報告快照（執行期產生的資料，不是原始碼，不該進版控）
+reports/
+
 # npm 相關
 package-lock.json.bak
 npm-debug.log*
