@@ -76,7 +76,11 @@ const html = `<!DOCTYPE html>
 const weekdayNames = ["週四","週五","週六","週日","週一","週二","週三"];
 const blue = "#2a78d6";
 const grayLight = "rgba(176,176,176,0.4)";
-const colors = ["#2a78d6","#eb6834","#898781","#1baf7a","#e87ba4"];
+const locationColorMap = { "龍王": "#2a78d6", "蝴蝶": "#eb6834", "道場": "#898781", "其他": "#1baf7a" };
+const fallbackColors = ["#e87ba4", "#4a3aa7", "#eda100"];
+function getLocationColor(label, fallbackIndex) {
+  return locationColorMap[label] || fallbackColors[fallbackIndex % fallbackColors.length];
+}
 
 let dailyChart, hourChart, locChartCurrent, locChartPrev, reports = [];
 
@@ -147,7 +151,7 @@ function render(index) {
   if (locChartCurrent) locChartCurrent.destroy();
   locChartCurrent = new Chart(document.getElementById("locChartCurrent"), {
     type: "doughnut",
-    data: { labels: currLocLabels, datasets: [{ data: currLocLabels.map((l) => current.locationCounts[l]), backgroundColor: colors }] },
+    data: { labels: currLocLabels, datasets: [{ data: currLocLabels.map((l) => current.locationCounts[l]), backgroundColor: currLocLabels.map(getLocationColor) }] },
     options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: "bottom" }, title: { display: true, text: "本週：" + current.weekLabel } } },
   });
 
@@ -156,7 +160,7 @@ function render(index) {
     const prevLocLabels = Object.keys(prev.locationCounts);
     locChartPrev = new Chart(document.getElementById("locChartPrev"), {
       type: "doughnut",
-      data: { labels: prevLocLabels, datasets: [{ data: prevLocLabels.map((l) => prev.locationCounts[l]), backgroundColor: colors }] },
+      data: { labels: prevLocLabels, datasets: [{ data: prevLocLabels.map((l) => prev.locationCounts[l]), backgroundColor: prevLocLabels.map(getLocationColor) }] },
       options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: "bottom" }, title: { display: true, text: "上週：" + prev.weekLabel } } },
     });
   }
