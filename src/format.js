@@ -62,6 +62,15 @@ export function addDays(dateStr, days) {
   return `${yy}-${mm}-${dd}`;
 }
 
+// 遊戲週定義：週四 ~ 下週三（配合遊戲更新時間），回傳 { start, end }（皆為 YYYY-MM-DD）
+export function getGameWeekRange(referenceDate) {
+  const idx = getWeekdayIndex(referenceDate); // 0=日...6=六，四=4
+  const diffFromThursday = (idx - 4 + 7) % 7;
+  const start = addDays(referenceDate, -diffFromThursday);
+  const end = addDays(start, 6);
+  return { start, end };
+}
+
 // 把 "HH:MM" 轉成分鐘數，格式錯誤回傳 null
 export function timeToMinutes(timeStr) {
   const match = (timeStr || "").trim().match(/^([0-1]?\d|2[0-3]):([0-5]\d)$/);
@@ -125,10 +134,12 @@ export function isBookingAttempt(content) {
 // 判斷管理頻道的留言是哪一種指令，第一行不是這幾種開頭就當作一般聊天忽略
 export function getAdminCommandType(content) {
   const firstLine = (content || "").trim().split("\n")[0].trim();
+  if (/^功能查詢/.test(firstLine)) return "help";
   if (/^解除週期鎖定/.test(firstLine)) return "unblock_recurring";
   if (/^解除鎖定/.test(firstLine)) return "unblock";
   if (/^查詢週期鎖定/.test(firstLine)) return "list_recurring";
-  if (/^查詢鎖定/.test(firstLine)) return "list";
+  if (/^查詢本週鎖定/.test(firstLine)) return "list_week";
+  if (/^查詢鎖定/.test(firstLine)) return "list_week"; // 舊指令名稱，保留向後相容
   if (/^週期鎖定/.test(firstLine)) return "block_recurring";
   if (/^鎖定/.test(firstLine)) return "block";
   return null;
@@ -149,7 +160,7 @@ export function parseBlockCommand(content) {
   };
 }
 
-// 解析「解除鎖定」指令：編號
+// 解析「解除鎖定」「解除週期鎖定」指令：編號
 export function parseUnblockCommand(content) {
   const m = (content || "").match(/編號[:：]\s*(\d+)/);
   return { id: m ? Number(m[1]) : null };

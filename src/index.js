@@ -12,6 +12,8 @@ import {
   cancelBookingById,
   getBookingsByDate,
   getBlockedSlotsByDate,
+  getBlockedSlotByDateTimeRange,
+  getBlockedSlotsBySourceRecurringId,
   getBlockedSlotById,
   getAllBlockedSlots,
   insertBlockedSlot,
@@ -35,7 +37,7 @@ import {
   getWeekdayLabel,
   getWeekdayIndex,
   getBookingDateToday,
-  getCurrentTimeMinutes,
+  getGameWeekRange,
   addDays,
   timeToMinutes,
   parseBookingMessage,
@@ -219,13 +221,32 @@ async function createDailyThread(parent, bookingDate) {
   console.log(`已建立討論串：${bookingDate}`);
   await logToAdmin(`🧵 已建立討論串：${formatThreadTitle(bookingDate)}`);
 
+  await materializeRecurringBlocksForDate(bookingDate);
   await announceBlockedSlotsForNewThread(bookingDate);
 }
 
-// 討論串一建立，掃描當天有沒有一次性或週期鎖定，有的話同步公告（跟排程時設定鎖定的時間點脫鉤）
-async function announceBlockedSlotsForNewThread(bookingDate) {
+// 依週期鎖定樣板，把「今天符合星期幾的樣板」自動轉成一筆單次鎖定紀錄。
+// 如果同一天同時段已經有人手動先設定過一次性鎖定，就不會重複產生。
+async function materializeRecurringBlocksForDate(bookingDate) {
   const weekday = getWeekdayIndex(bookingDate);
-  const allSlots = [...getBlockedSlotsByDate(bookingDate), ...getRecurringBlockedSlotsByWeekday(weekday)];
+  const templates = getRecurringBlockedSlotsByWeekday(weekday);
+
+  for (const tpl of templates) {
+    const existing = getBlockedSlotByDateTimeRange(bookingDate, tpl.start_time, tpl.end_time);
+    if (existing) continue;
+    insertBlockedSlot({
+      bookingDate,
+      startTime: tpl.start_time,
+      endTime: tpl.end_time,
+      reason: tpl.reason,
+      sourceRecurringId: tpl.id,
+    });
+  }
+}
+
+// 討論串一建立，掃描當天有沒有鎖定時段（含週期樣板剛產生出來的），有的話同步公告
+async function announceBlockedSlotsForNewThread(bookingDate) {
+  const allSlots = getBlockedSlotsByDate(bookingDate);
   if (!allSlots.length) return;
 
   const lines = allSlots
@@ -300,11 +321,8 @@ async function handleBookingMessage(message, { isEdit }) {
   const bookingDate = summaryRow.booking_date;
   const existingBooking = getBookingByMessageId(message.id);
 
-  // 鎖定時段檢查：如果這個時段被設定為不開放預約（一次性或每週固定），直接擋下
-  const weekday = getWeekdayIndex(bookingDate);
-  const blockedSlot =
-    getBlockedSlotsByDate(bookingDate).find((slot) => isWithinBlockedSlot(newMinutes, slot)) ||
-    getRecurringBlockedSlotsByWeekday(weekday).find((slot) => isWithinBlockedSlot(newMinutes, slot));
+  // 鎖定時段檢查：週期鎖定在討論串建立時就已經自動產生對應的單次鎖定紀錄，這裡只需要查單次鎖定表
+  const blockedSlot = getBlockedSlotsByDate(bookingDate).find((slot) => isWithinBlockedSlot(newMinutes, slot));
   if (blockedSlot) {
     await safeReact(message, "🚫");
     await message
@@ -367,7 +385,7 @@ async function sendAnnouncement(text, files = []) {
   }
 }
 
-// 管理頻道指令：一次性鎖定「鎖定/解除鎖定/查詢鎖定」+ 週期鎖定「週期鎖定/解除週期鎖定/查詢週期鎖定」
+// 管理頻道指令：一次性鎖定、週期鎖定、查詢、功能說明
 // 其他訊息當一般聊天忽略，不處理也不回覆
 async function handleAdminCommand(message) {
   const commandType = getAdminCommandType(message.content);
@@ -377,41 +395,52 @@ async function handleAdminCommand(message) {
     await handleBlockCommand(message);
   } else if (commandType === "unblock") {
     await handleUnblockCommand(message);
-  } else if (commandType === "list") {
-    await handleListBlockCommand(message);
+  } else if (commandType === "list_week") {
+    await handleWeekListCommand(message);
   } else if (commandType === "block_recurring") {
     await handleRecurringBlockCommand(message);
   } else if (commandType === "unblock_recurring") {
     await handleRecurringUnblockCommand(message);
-  } else {
+  } else if (commandType === "list_recurring") {
     await handleRecurringListCommand(message);
+  } else {
+    await handleHelpCommand(message);
   }
 }
 
-// 「查詢鎖定」指令：列出目前所有還有效的鎖定時段與編號，已過期的自動濾掉
-async function handleListBlockCommand(message) {
+// 「查詢本週鎖定」（也接受舊名「查詢鎖定」）：本週定義為週四~下週三。
+// 一次性鎖定跟週期樣板產生出來的鎖定，本質上都是同一張表的紀錄，直接查、統一用 [單次]/[週期#N] 標註來源
+async function handleWeekListCommand(message) {
   const today = getBookingDateToday();
-  const nowMinutes = getCurrentTimeMinutes();
+  const { start, end } = getGameWeekRange(today);
 
-  const slots = getAllBlockedSlots().filter((s) => {
-    if (s.booking_date > today) return true;
-    if (s.booking_date < today) return false;
-    // 同一天：結束時間還沒過才算有效
-    const endMin = timeToMinutes(s.end_time);
-    return endMin === null || endMin >= nowMinutes;
-  });
+  const slots = getAllBlockedSlots().filter((s) => s.booking_date >= start && s.booking_date <= end);
 
   if (!slots.length) {
-    await message.reply("目前沒有任何有效的鎖定時段。").catch(() => {});
+    await message
+      .reply(`本週（${formatDateLabel(start)}~${formatDateLabel(end)}）目前沒有任何鎖定時段。`)
+      .catch(() => {});
     return;
   }
 
-  const lines = slots.map((s) => {
-    const reasonText = s.reason ? `｜${s.reason}` : "";
-    return `#${s.id}｜${formatDateLabel(s.booking_date)} (${getWeekdayLabel(s.booking_date)})｜${s.start_time}~${s.end_time}${reasonText}`;
-  });
+  const lines = slots
+    .slice()
+    .sort((a, b) => {
+      if (a.booking_date !== b.booking_date) return a.booking_date < b.booking_date ? -1 : 1;
+      return timeToMinutes(a.start_time) - timeToMinutes(b.start_time);
+    })
+    .map((s) => {
+      const tag = s.source_recurring_id ? `[週期#${s.source_recurring_id}]` : "[單次]";
+      return `#${s.id}｜${tag}｜${formatDateLabel(s.booking_date)} (${getWeekdayLabel(s.booking_date)})｜${s.start_time}~${s.end_time}${s.reason ? `｜${s.reason}` : ""}`;
+    });
 
-  await message.reply(`📋 目前有效的鎖定時段：\n${lines.join("\n")}`).catch(() => {});
+  await message
+    .reply(
+      `📋 本週鎖定時段（${formatDateLabel(start)}~${formatDateLabel(end)}）：\n${lines.join("\n")}\n\n` +
+        `・要移除任何一筆，都用「解除鎖定：編號：X」（單次跟週期產生的都一樣，用上面列出的 # 編號）\n` +
+        `・[週期#N] 代表這筆是從週期鎖定規則 #N 自動產生的，只解除這一筆不影響規則本身，其他週還是照常鎖定`
+    )
+    .catch(() => {});
 }
 
 // 「查詢週期鎖定」指令：列出所有每週固定的鎖定設定
@@ -452,14 +481,20 @@ async function handleRecurringBlockCommand(message) {
     return;
   }
 
-  const blockId = insertRecurringBlockedSlot({ weekday, startTime: start, endTime: end, reason });
+  const templateId = insertRecurringBlockedSlot({ weekday, startTime: start, endTime: end, reason });
 
-  // 掃描目前已存在討論串的未來 7 天內，把符合這個星期幾、時間衝突的預約取消
+  // 掃描目前已存在討論串的未來 7 天內，符合這個星期幾的日期：
+  // 先產生對應的單次鎖定紀錄（已經有的話不重複），再取消時間衝突的預約
   const today = getBookingDateToday();
   const affectedGroups = [];
   for (let i = 0; i <= 6; i++) {
     const date = addDays(today, i);
     if (getWeekdayIndex(date) !== weekday) continue;
+
+    const existingBlock = getBlockedSlotByDateTimeRange(date, start, end);
+    if (!existingBlock) {
+      insertBlockedSlot({ bookingDate: date, startTime: start, endTime: end, reason, sourceRecurringId: templateId });
+    }
 
     const affected = getBookingsByDate(date).filter((b) => {
       const mins = timeToMinutes(b.scheduled_time);
@@ -493,7 +528,7 @@ async function handleRecurringBlockCommand(message) {
   // 沒有任何預約受影響時不主動公告，等對應日期的討論串建立時再一併公告（見 announceBlockedSlotsForNewThread）
 
   await message
-    .reply(`已設定每週${weekdayLabel} ${start}~${end} 固定鎖定（編號 #${blockId}），取消了 ${totalAffected} 筆衝突的預約。`)
+    .reply(`已設定每週${weekdayLabel} ${start}~${end} 固定鎖定（編號 #${templateId}），取消了 ${totalAffected} 筆衝突的預約。`)
     .catch(() => {});
   await logToAdmin(`🚫 已設定週期鎖定：每週${weekdayLabel} ${start}~${end}${reasonText}，取消 ${totalAffected} 筆預約`);
 }
@@ -515,8 +550,18 @@ async function handleRecurringUnblockCommand(message) {
   deleteRecurringBlockedSlot(id);
   const weekdayLabel = "日一二三四五六"[slot.weekday];
 
+  // 同步清掉這條樣板已經產生出來、還沒過期的單次鎖定，讓「解除」立刻生效，不用等到下週
+  const today = getBookingDateToday();
+  const materialized = getBlockedSlotsBySourceRecurringId(id).filter((s) => s.booking_date >= today);
+  for (const m of materialized) {
+    deleteBlockedSlot(m.id);
+  }
+
   await message
-    .reply(`已解除每週${weekdayLabel} ${slot.start_time}~${slot.end_time} 的固定鎖定（編號 #${id}）。`)
+    .reply(
+      `已解除每週${weekdayLabel} ${slot.start_time}~${slot.end_time} 的固定鎖定（編號 #${id}），` +
+        `同時清除了 ${materialized.length} 筆已經產生、還沒發生的鎖定。`
+    )
     .catch(() => {});
 
   const unlockImage = buildAnnouncementAttachment("unlock.png");
@@ -526,6 +571,28 @@ async function handleRecurringUnblockCommand(message) {
   );
 
   await logToAdmin(`✅ 已解除週期鎖定 #${id}（每週${weekdayLabel} ${slot.start_time}~${slot.end_time}）`);
+}
+
+// 「跳過週期鎖定」指令：某條週期規則，這一次（指定日期）先不套用，其他週照常鎖定
+// 「功能查詢」指令：列出管理頻道所有可用指令跟格式
+async function handleHelpCommand(message) {
+  const helpText = [
+    "📖 管理頻道可用指令",
+    "",
+    "**鎖定** — 鎖定某一天的時段",
+    "```\n鎖定：\n日期：MM/DD\n開始：HH:MM\n結束：HH:MM\n原因：(選填)\n```",
+    "**解除鎖定** — 移除某筆鎖定（不管是手動設的，還是週期鎖定自動產生的，都用這個指令）",
+    "```\n解除鎖定：\n編號：X\n```",
+    "**週期鎖定** — 設定每週固定星期幾的時段，到了那天討論串建立時會自動產生對應的單次鎖定",
+    "```\n週期鎖定：\n星期：日一二三四五六其中一字\n開始：HH:MM\n結束：HH:MM\n原因：(選填)\n```",
+    "**解除週期鎖定** — 永久移除某條週期規則（連同已經產生、還沒發生的鎖定一起清除）",
+    "```\n解除週期鎖定：\n編號：X\n```",
+    "**查詢本週鎖定**（也可打「查詢鎖定」）— 列出本週（週四~下週三）所有鎖定，含來源標註",
+    "**查詢週期鎖定** — 列出所有週期規則跟編號",
+    "**功能查詢** — 顯示這份說明",
+  ].join("\n");
+
+  await message.reply(helpText).catch(() => {});
 }
 
 // 「鎖定」指令：寫入鎖定時段 → 刪除已衝突的預約 → 討論串發公告 tag 受影響的人 → 回覆管理頻道

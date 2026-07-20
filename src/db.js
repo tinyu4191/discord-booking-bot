@@ -31,19 +31,30 @@ db.exec(`
   )
 `);
 
-// 記錄「某天某時段不開放預約」的設定（例如負責施法的人臨時不能上線）
+// 記錄「某天某時段不開放預約」的設定。source_recurring_id 若不為空，代表這筆是
+// 從某條週期鎖定樣板（recurring_blocked_slots）自動產生出來的，方便追蹤來源，
+// 但解除時跟手動建立的一次性鎖定完全一樣，都是同一套「解除鎖定：編號：X」指令
 db.exec(`
   CREATE TABLE IF NOT EXISTS blocked_slots (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    booking_date TEXT NOT NULL,
-    start_time   TEXT NOT NULL,  -- HH:MM
-    end_time     TEXT NOT NULL,  -- HH:MM
-    reason       TEXT,
-    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    booking_date        TEXT NOT NULL,
+    start_time          TEXT NOT NULL,  -- HH:MM
+    end_time            TEXT NOT NULL,  -- HH:MM
+    reason              TEXT,
+    source_recurring_id INTEGER,        -- 由哪條週期鎖定樣板自動產生，手動建立的是 NULL
+    created_at          TEXT NOT NULL DEFAULT (datetime('now'))
   )
 `);
 
-// 記錄「每週固定星期幾的某個時段」不開放預約（例如每週五晚上固定休息）
+// 舊版資料庫沒有 source_recurring_id 欄位時，自動補上（安全、可重複執行）
+const blockedSlotsColumns = db.prepare(`PRAGMA table_info(blocked_slots)`).all().map((c) => c.name);
+if (!blockedSlotsColumns.includes("source_recurring_id")) {
+  db.exec(`ALTER TABLE blocked_slots ADD COLUMN source_recurring_id INTEGER`);
+}
+
+// 週期鎖定「樣板」：每週固定星期幾的某個時段不開放（例如每週五晚上固定休息）。
+// 這張表本身不會直接拿來擋預約——實際擋預約用的是 blocked_slots 裡自動產生出來的那些一次性紀錄，
+// 樣板只在每天建立新討論串時，被拿來檢查「今天要不要自動產生一筆單次鎖定」
 db.exec(`
   CREATE TABLE IF NOT EXISTS recurring_blocked_slots (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -168,12 +179,12 @@ export function markSummaryLocked(bookingDate) {
 
 // ---- 鎖定時段（不開放預約）相關 ----
 
-export function insertBlockedSlot({ bookingDate, startTime, endTime, reason }) {
+export function insertBlockedSlot({ bookingDate, startTime, endTime, reason, sourceRecurringId }) {
   const stmt = db.prepare(`
-    INSERT INTO blocked_slots (booking_date, start_time, end_time, reason)
-    VALUES (?, ?, ?, ?)
+    INSERT INTO blocked_slots (booking_date, start_time, end_time, reason, source_recurring_id)
+    VALUES (?, ?, ?, ?, ?)
   `);
-  const result = stmt.run(bookingDate, startTime, endTime, reason || null);
+  const result = stmt.run(bookingDate, startTime, endTime, reason || null, sourceRecurringId || null);
   return result.lastInsertRowid;
 }
 
@@ -181,6 +192,20 @@ export function getBlockedSlotsByDate(bookingDate) {
   return db.prepare(`
     SELECT * FROM blocked_slots WHERE booking_date = ? ORDER BY start_time
   `).all(bookingDate);
+}
+
+// 查同一天、同時段有沒有已經存在的鎖定紀錄，用來避免週期鎖定重複產生同一筆
+export function getBlockedSlotByDateTimeRange(bookingDate, startTime, endTime) {
+  return db.prepare(`
+    SELECT * FROM blocked_slots WHERE booking_date = ? AND start_time = ? AND end_time = ?
+  `).get(bookingDate, startTime, endTime);
+}
+
+// 查某條週期鎖定樣板，目前已經產生過哪些一次性鎖定（用於樣板刪除時一併清理）
+export function getBlockedSlotsBySourceRecurringId(sourceRecurringId) {
+  return db.prepare(`
+    SELECT * FROM blocked_slots WHERE source_recurring_id = ?
+  `).all(sourceRecurringId);
 }
 
 // 查詢所有鎖定時段（不分日期），過期與否由呼叫端依「現在時間」判斷後過濾
@@ -198,7 +223,7 @@ export function deleteBlockedSlot(id) {
   db.prepare(`DELETE FROM blocked_slots WHERE id = ?`).run(id);
 }
 
-// ---- 週期鎖定（每週固定星期幾的某時段不開放）----
+// ---- 週期鎖定樣板 ----
 
 export function insertRecurringBlockedSlot({ weekday, startTime, endTime, reason }) {
   const stmt = db.prepare(`
@@ -225,6 +250,7 @@ export function getRecurringBlockedSlotById(id) {
   return db.prepare(`SELECT * FROM recurring_blocked_slots WHERE id = ?`).get(id);
 }
 
+// 只刪樣板本身，不會動到已經產生出來的一次性鎖定（那些要清理由呼叫端另外處理）
 export function deleteRecurringBlockedSlot(id) {
   db.prepare(`DELETE FROM recurring_blocked_slots WHERE id = ?`).run(id);
 }
