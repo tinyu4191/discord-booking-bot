@@ -77,7 +77,11 @@ const WEEKDAY_IMAGE_FILES = ["sun.png", "mon.png", "tue.png", "wed.png", "thu.pn
 
 // 討論串建立時，預先保留幾頁班表訊息的位置（固定排在討論串前段，不會被之後的聊天夾在中間）。
 // 實際筆數超過這個保留頁數才會用到 refreshSummaryMessage 裡的動態新增機制（那種情況位置就無法保證在前段了）
-const RESERVED_SUMMARY_PAGES = 3;
+// 討論串建立時，預先保留幾頁班表訊息的位置（固定排在討論串前段，不會被之後的聊天夾在中間）。
+// 目前關閉（設成 1 = 不預留），因為代價是每天不管有沒有需要都會多出 2 則幾乎空白的訊息，太干擾。
+// 分頁機制本身還是完整保留：真的筆數多到超過長度上限時，還是會自動動態新增分頁，
+// 只是新增的那則位置無法保證緊接在第一頁後面（可能被夾在後續聊天中間）
+const RESERVED_SUMMARY_PAGES = 1;
 
 client.once(Events.ClientReady, async () => {
   console.log(`已登入：${client.user.tag}`);
