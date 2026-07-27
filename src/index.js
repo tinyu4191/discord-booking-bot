@@ -71,6 +71,10 @@ const client = new Client({
 // 0=週日 ... 6=週六 對應的星期圖片檔名，請把對應圖片放到 assets/weekday/ 底下
 const WEEKDAY_IMAGE_FILES = ["sun.png", "mon.png", "tue.png", "wed.png", "thu.png", "fri.png", "sat.png"];
 
+// 討論串建立時，預先保留幾頁班表訊息的位置（固定排在討論串前段，不會被之後的聊天夾在中間）。
+// 實際筆數超過這個保留頁數才會用到 refreshSummaryMessage 裡的動態新增機制（那種情況位置就無法保證在前段了）
+const RESERVED_SUMMARY_PAGES = 2;
+
 client.once(Events.ClientReady, async () => {
   console.log(`已登入：${client.user.tag}`);
   await ensureUpcomingThreads();
@@ -237,12 +241,21 @@ async function createDailyThread(parent, bookingDate) {
   }
   await guideMsg.pin().catch((err) => console.warn("置頂失敗（可能缺少 Manage Messages 權限）：", err.message));
 
-  // 班表用獨立的 embed 訊息呈現，跟上面的說明分開，比較顯眼
-  const statsEmbed = buildSummaryEmbed(bookingDate, []);
+  // 班表用獨立的 embed 訊息呈現，跟上面的說明分開，比較顯眼。
+  // 一開始就把保留的分頁位置都建立好（見 RESERVED_SUMMARY_PAGES），
+  // 這樣不管之後筆數怎麼變化，這些訊息永遠固定在討論串前段，不會被之後的聊天訊息夾在中間
+  const statsEmbed = buildSummaryEmbed(bookingDate, [], 0, RESERVED_SUMMARY_PAGES);
   const statsMsg = await thread.send({ embeds: [statsEmbed] });
   await statsMsg.pin().catch((err) => console.warn("置頂失敗（可能缺少 Manage Messages 權限）：", err.message));
-
   setSummaryMessage(bookingDate, thread.id, statsMsg.id);
+
+  for (let i = 1; i < RESERVED_SUMMARY_PAGES; i++) {
+    const pageEmbed = buildSummaryEmbed(bookingDate, [], i, RESERVED_SUMMARY_PAGES);
+    const pageMsg = await thread.send({ embeds: [pageEmbed] });
+    await pageMsg.pin().catch((err) => console.warn("置頂失敗（可能缺少 Manage Messages 權限）：", err.message));
+    setSummaryPage(bookingDate, i, pageMsg.id);
+  }
+
   console.log(`已建立討論串：${bookingDate}`);
   await logToAdmin(`🧵 已建立討論串：${formatThreadTitle(bookingDate)}`);
 
@@ -742,22 +755,25 @@ async function refreshSummaryMessage(bookingDate) {
   const bookings = getConfirmedBookingsByDate(bookingDate);
   const pages = chunkBookingsForSummary(bookings);
   const totalPages = pages.length;
+  // 顯示用的頁數：至少會撐滿保留頁數（就算目前資料不夠，保留頁還是要更新成「本頁無資料」，
+  // 不會因為筆數變少就被刪掉、導致訊息位置跑掉）
+  const displayPages = Math.max(totalPages, RESERVED_SUMMARY_PAGES);
 
   const thread = await client.channels.fetch(summaryRow.channel_id);
 
   // 第 0 頁：沿用 daily_summary 記錄的主訊息
-  const embed0 = buildSummaryEmbed(bookingDate, pages[0], 0, totalPages);
+  const embed0 = buildSummaryEmbed(bookingDate, pages[0] || [], 0, displayPages);
   const msg0 = await thread.messages.fetch(summaryRow.message_id);
   await msg0.edit({ embeds: [embed0] });
   if (!msg0.pinned) {
     await msg0.pin().catch((err) => console.warn("置頂失敗（可能缺少 Manage Messages 權限）：", err.message));
   }
 
-  // 第 1 頁以後：預約多到需要分頁時才會用到，需要就建立/更新，不需要就清掉多餘的
+  // 第 1 頁以後：先更新/建立到 displayPages 為止（保留頁固定存在，超出保留頁數的部分才是動態新增）
   const existingPages = getSummaryPages(bookingDate);
 
-  for (let i = 1; i < totalPages; i++) {
-    const embed = buildSummaryEmbed(bookingDate, pages[i], i, totalPages);
+  for (let i = 1; i < displayPages; i++) {
+    const embed = buildSummaryEmbed(bookingDate, pages[i] || [], i, displayPages);
     const existing = existingPages.find((p) => p.page_index === i);
 
     if (existing) {
@@ -775,9 +791,10 @@ async function refreshSummaryMessage(bookingDate) {
     setSummaryPage(bookingDate, i, newMsg.id);
   }
 
-  // 清掉不再需要的分頁（例如取消預約後，原本要兩頁現在一頁就夠了）
+  // 只清掉「超出保留頁數」的額外分頁（例如衝到第 4 頁又縮回第 2 頁時，把多的第 4 頁刪掉）；
+  // 保留頁範圍內的分頁固定存在，不會因為暫時沒資料就被刪除
   for (const p of existingPages) {
-    if (p.page_index >= totalPages) {
+    if (p.page_index >= displayPages) {
       try {
         const oldMsg = await thread.messages.fetch(p.message_id);
         await oldMsg.delete();
