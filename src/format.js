@@ -90,8 +90,8 @@ export function isWithinBlockedSlot(minutes, slot) {
 // 精簡成單行格式，不用粗體語法跟裝飾分隔線（純裝飾不含資訊量，但佔字元數），
 // 這樣同樣的字元預算能塞進更多筆，降低分頁門檻後也不容易一般日子就爆頁
 function formatBookingLine(b) {
-  const proxyLine = b.proxy_for ? ` (代約:${b.proxy_for})` : "";
-  return `🕒${b.scheduled_time} 📍${b.location} 🔀${b.channel || "當日決定"} 👤<@${b.booker_id}>${proxyLine}`;
+  const proxyLine = b.proxy_for ? ` (代約: ${b.proxy_for})` : "";
+  return `🕒 ${b.scheduled_time}　📍 ${b.location}　🔀 ${b.channel || "當日決定"}　👤 <@${b.booker_id}>${proxyLine}`;
 }
 
 // 每筆之間留一個空白行，方便閱讀又只多佔 1 個字元（比原本的裝飾分隔線省很多）
