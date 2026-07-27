@@ -29,6 +29,9 @@ import {
   getSummaryMessage,
   getSummaryByThreadId,
   setSummaryMessage,
+  getSummaryPages,
+  setSummaryPage,
+  deleteSummaryPage,
   getUnlockedPastSummaries,
   markSummaryLocked,
 } from "./db.js";
@@ -53,6 +56,7 @@ import {
   parseUnblockCommand,
   parseMMDDToFullDate,
   buildSummaryEmbed,
+  chunkBookingsForSummary,
 } from "./format.js";
 
 const client = new Client({
@@ -386,7 +390,11 @@ async function handleBookingMessage(message, { isEdit }) {
   }
 
   await safeReact(message, "✅");
-  await refreshSummaryMessage(bookingDate);
+  try {
+    await refreshSummaryMessage(bookingDate);
+  } catch (err) {
+    console.error(`更新班表失敗 (${bookingDate})：`, err);
+  }
   await logToAdmin(
     `📋 ${isEdit ? "更新" : "新"}預約｜${bookingDate}｜${location} / ${time} / ${channel || "當日決定"}｜<@${message.author.id}>`
   );
@@ -732,13 +740,52 @@ async function refreshSummaryMessage(bookingDate) {
   if (!summaryRow) return;
 
   const bookings = getConfirmedBookingsByDate(bookingDate);
-  const embed = buildSummaryEmbed(bookingDate, bookings);
+  const pages = chunkBookingsForSummary(bookings);
+  const totalPages = pages.length;
 
   const thread = await client.channels.fetch(summaryRow.channel_id);
-  const msg = await thread.messages.fetch(summaryRow.message_id);
-  await msg.edit({ embeds: [embed] });
-  if (!msg.pinned) {
-    await msg.pin().catch((err) => console.warn("置頂失敗（可能缺少 Manage Messages 權限）：", err.message));
+
+  // 第 0 頁：沿用 daily_summary 記錄的主訊息
+  const embed0 = buildSummaryEmbed(bookingDate, pages[0], 0, totalPages);
+  const msg0 = await thread.messages.fetch(summaryRow.message_id);
+  await msg0.edit({ embeds: [embed0] });
+  if (!msg0.pinned) {
+    await msg0.pin().catch((err) => console.warn("置頂失敗（可能缺少 Manage Messages 權限）：", err.message));
+  }
+
+  // 第 1 頁以後：預約多到需要分頁時才會用到，需要就建立/更新，不需要就清掉多餘的
+  const existingPages = getSummaryPages(bookingDate);
+
+  for (let i = 1; i < totalPages; i++) {
+    const embed = buildSummaryEmbed(bookingDate, pages[i], i, totalPages);
+    const existing = existingPages.find((p) => p.page_index === i);
+
+    if (existing) {
+      try {
+        const msg = await thread.messages.fetch(existing.message_id);
+        await msg.edit({ embeds: [embed] });
+        continue;
+      } catch (err) {
+        console.warn(`分頁訊息抓不到，重新建立 (${bookingDate} 第 ${i + 1} 頁)：`, err.message);
+      }
+    }
+
+    const newMsg = await thread.send({ embeds: [embed] });
+    await newMsg.pin().catch((err) => console.warn("分頁訊息置頂失敗：", err.message));
+    setSummaryPage(bookingDate, i, newMsg.id);
+  }
+
+  // 清掉不再需要的分頁（例如取消預約後，原本要兩頁現在一頁就夠了）
+  for (const p of existingPages) {
+    if (p.page_index >= totalPages) {
+      try {
+        const oldMsg = await thread.messages.fetch(p.message_id);
+        await oldMsg.delete();
+      } catch (err) {
+        console.warn(`清除多餘分頁訊息失敗 (${bookingDate} 第 ${p.page_index + 1} 頁)：`, err.message);
+      }
+      deleteSummaryPage(bookingDate, p.page_index);
+    }
   }
 }
 

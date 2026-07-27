@@ -26,8 +26,19 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS daily_summary (
     booking_date TEXT PRIMARY KEY,
     channel_id   TEXT NOT NULL,  -- 討論串(thread) id
-    message_id   TEXT NOT NULL,  -- 統計訊息(starter message) id
+    message_id   TEXT NOT NULL,  -- 統計訊息(starter message，也就是第 0 頁) id
     locked       INTEGER NOT NULL DEFAULT 0  -- 是否已被自動鎖定/封存
+  )
+`);
+
+// 當某天預約筆數多到讓班表 embed 超過 Discord 4096 字元上限時，多出來的部分會拆到額外分頁訊息，
+// 記錄在這裡（page_index 從 1 開始，0 是 daily_summary 裡記錄的那則主訊息）
+db.exec(`
+  CREATE TABLE IF NOT EXISTS summary_pages (
+    booking_date TEXT NOT NULL,
+    page_index   INTEGER NOT NULL,
+    message_id   TEXT NOT NULL,
+    PRIMARY KEY (booking_date, page_index)
   )
 `);
 
@@ -175,6 +186,26 @@ export function getUnlockedPastSummaries(todayStr) {
 
 export function markSummaryLocked(bookingDate) {
   db.prepare(`UPDATE daily_summary SET locked = 1 WHERE booking_date = ?`).run(bookingDate);
+}
+
+// ---- 班表分頁訊息（page_index >= 1，page 0 記錄在 daily_summary） ----
+
+export function getSummaryPages(bookingDate) {
+  return db.prepare(`
+    SELECT * FROM summary_pages WHERE booking_date = ? ORDER BY page_index
+  `).all(bookingDate);
+}
+
+export function setSummaryPage(bookingDate, pageIndex, messageId) {
+  db.prepare(`
+    INSERT INTO summary_pages (booking_date, page_index, message_id)
+    VALUES (?, ?, ?)
+    ON CONFLICT(booking_date, page_index) DO UPDATE SET message_id = excluded.message_id
+  `).run(bookingDate, pageIndex, messageId);
+}
+
+export function deleteSummaryPage(bookingDate, pageIndex) {
+  db.prepare(`DELETE FROM summary_pages WHERE booking_date = ? AND page_index = ?`).run(bookingDate, pageIndex);
 }
 
 // ---- 鎖定時段（不開放預約）相關 ----

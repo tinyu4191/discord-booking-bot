@@ -86,27 +86,59 @@ export function isWithinBlockedSlot(minutes, slot) {
   return minutes >= startMin && minutes <= endMin;
 }
 
-// 把當天預約清單做成 embed 卡片，index.js 跟一次性遷移腳本共用這個函式
-export function buildSummaryEmbed(bookingDate, bookings) {
-  const title = `📅 ${formatDateLabel(bookingDate)} (${getWeekdayLabel(bookingDate)}) 預約統計`;
-  const embed = new EmbedBuilder().setTitle(title).setColor(0x5865f2);
+// 單筆預約的顯示格式，抽出來給 buildSummaryEmbed 跟分頁計算共用，確保長度計算跟實際顯示一致
+function formatBookingLine(b) {
+  const proxyLine = b.proxy_for ? `　(代約: ${b.proxy_for})` : "";
+  return `🕒 **${b.scheduled_time}**　📍 ${b.location}　🔀 ${b.channel || "當日決定"}\n👤 <@${b.booker_id}>${proxyLine}`;
+}
 
-  if (!bookings.length) {
-    embed.setDescription("目前尚無預約 🌙");
-    return embed;
-  }
+const SUMMARY_LINE_SEPARATOR = "\n┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈\n";
+// Discord embed description 上限是 4096 字元，這裡抓保守一點的門檻，留緩衝空間
+const MAX_SUMMARY_DESCRIPTION_LENGTH = 3800;
 
+// 把預約清單依照長度上限切成多頁，確保每一頁的 embed description 都不會超過 Discord 限制。
+// 沒有預約時也會回傳一個空陣列的頁面，讓呼叫端能正常顯示「目前尚無預約」
+export function chunkBookingsForSummary(bookings) {
   const sorted = bookings
     .slice()
     .sort((a, b) => timeToMinutes(a.scheduled_time) - timeToMinutes(b.scheduled_time));
 
-  const description = sorted
-    .map((b) => {
-      const proxyLine = b.proxy_for ? `　(代約: ${b.proxy_for})` : "";
-      return `🕒 **${b.scheduled_time}**　📍 ${b.location}　🔀 ${b.channel || "當日決定"}\n👤 <@${b.booker_id}>${proxyLine}`;
-    })
-    .join("\n┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈\n");
+  const pages = [];
+  let current = [];
+  let currentLength = 0;
 
+  for (const b of sorted) {
+    const line = formatBookingLine(b);
+    const addLength = line.length + (current.length > 0 ? SUMMARY_LINE_SEPARATOR.length : 0);
+
+    if (current.length > 0 && currentLength + addLength > MAX_SUMMARY_DESCRIPTION_LENGTH) {
+      pages.push(current);
+      current = [];
+      currentLength = 0;
+    }
+
+    current.push(b);
+    currentLength += line.length + (current.length > 1 ? SUMMARY_LINE_SEPARATOR.length : 0);
+  }
+
+  if (current.length > 0) pages.push(current);
+  if (pages.length === 0) pages.push([]);
+  return pages;
+}
+
+// 把當天預約清單（單一頁的份）做成 embed 卡片。pageIndex/totalPages 選填，
+// 只有 totalPages > 1 時標題才會加上「(第 X / Y 頁)」，一般情境不受影響
+export function buildSummaryEmbed(bookingDate, bookings, pageIndex = 0, totalPages = 1) {
+  const pageSuffix = totalPages > 1 ? `（第 ${pageIndex + 1} / ${totalPages} 頁）` : "";
+  const title = `📅 ${formatDateLabel(bookingDate)} (${getWeekdayLabel(bookingDate)}) 預約統計${pageSuffix}`;
+  const embed = new EmbedBuilder().setTitle(title).setColor(0x5865f2);
+
+  if (!bookings.length) {
+    embed.setDescription(pageIndex === 0 ? "目前尚無預約 🌙" : "（本頁無資料）");
+    return embed;
+  }
+
+  const description = bookings.map(formatBookingLine).join(SUMMARY_LINE_SEPARATOR);
   embed.setDescription(description);
   return embed;
 }
