@@ -34,6 +34,9 @@ import {
   deleteSummaryPage,
   getUnlockedPastSummaries,
   markSummaryLocked,
+  deleteSummaryMessage,
+  deleteAllSummaryPages,
+  deleteBookingsByDate,
 } from "./db.js";
 import { generateWeeklyReport, saveReport } from "./report.js";
 import {
@@ -54,6 +57,7 @@ import {
   parseRecurringBlockCommand,
   parseWeekdayInput,
   parseUnblockCommand,
+  parseTestThreadCommand,
   parseMMDDToFullDate,
   buildSummaryEmbed,
   chunkBookingsForSummary,
@@ -73,7 +77,7 @@ const WEEKDAY_IMAGE_FILES = ["sun.png", "mon.png", "tue.png", "wed.png", "thu.pn
 
 // 討論串建立時，預先保留幾頁班表訊息的位置（固定排在討論串前段，不會被之後的聊天夾在中間）。
 // 實際筆數超過這個保留頁數才會用到 refreshSummaryMessage 裡的動態新增機制（那種情況位置就無法保證在前段了）
-const RESERVED_SUMMARY_PAGES = 2;
+const RESERVED_SUMMARY_PAGES = 3;
 
 client.once(Events.ClientReady, async () => {
   console.log(`已登入：${client.user.tag}`);
@@ -445,9 +449,71 @@ async function handleAdminCommand(message) {
     await handleRecurringUnblockCommand(message);
   } else if (commandType === "list_recurring") {
     await handleRecurringListCommand(message);
+  } else if (commandType === "create_test_thread") {
+    await handleCreateTestThreadCommand(message);
+  } else if (commandType === "delete_test_thread") {
+    await handleDeleteTestThreadCommand(message);
   } else {
     await handleHelpCommand(message);
   }
+}
+
+// 「建立測試討論串」指令：不受未來 7 天範圍限制，指定任意日期（含很久以後）建立一個獨立的測試討論串，
+// 完全沿用正式的 createDailyThread 邏輯，所以測試結果跟正式環境行為一致
+async function handleCreateTestThreadCommand(message) {
+  const { date } = parseTestThreadCommand(message.content);
+  if (!date) {
+    await message
+      .reply("請附上完整日期（YYYY-MM-DD），例如：\n```\n建立測試討論串：\n日期：2027-03-15\n```")
+      .catch(() => {});
+    return;
+  }
+
+  if (getSummaryMessage(date)) {
+    await message
+      .reply(`${date} 已經有討論串了，不會重複建立。要重測請先用「刪除測試討論串」清掉。`)
+      .catch(() => {});
+    return;
+  }
+
+  try {
+    const parent = await client.channels.fetch(process.env.BOOKING_PARENT_CHANNEL_ID);
+    await createDailyThread(parent, date);
+    await message.reply(`已建立測試討論串：${date}。測試完記得用「刪除測試討論串」清掉，不要留著。`).catch(() => {});
+  } catch (err) {
+    console.error(`建立測試討論串失敗 (${date})：`, err);
+    await message.reply("建立失敗，請查看伺服器 log（pm2 logs booking-bot）。").catch(() => {});
+  }
+}
+
+// 「刪除測試討論串」指令：整串刪除（Discord 討論串本身 + daily_summary/summary_pages/bookings 相關資料）
+async function handleDeleteTestThreadCommand(message) {
+  const { date } = parseTestThreadCommand(message.content);
+  if (!date) {
+    await message
+      .reply("請附上日期（YYYY-MM-DD），例如：\n```\n刪除測試討論串：\n日期：2027-03-15\n```")
+      .catch(() => {});
+    return;
+  }
+
+  const summaryRow = getSummaryMessage(date);
+  if (!summaryRow) {
+    await message.reply(`找不到 ${date} 的討論串紀錄。`).catch(() => {});
+    return;
+  }
+
+  try {
+    const thread = await client.channels.fetch(summaryRow.channel_id);
+    await thread.delete();
+  } catch (err) {
+    console.warn(`刪除討論串失敗 (${date})，可能已經被手動刪除：`, err.message);
+  }
+
+  deleteAllSummaryPages(date);
+  deleteSummaryMessage(date);
+  deleteBookingsByDate(date);
+
+  await message.reply(`已刪除 ${date} 的測試討論串與相關資料。`).catch(() => {});
 }
 
 // 「查詢本週鎖定」（也接受舊名「查詢鎖定」）：本週定義為週四~下週三。
@@ -631,6 +697,10 @@ async function handleHelpCommand(message) {
     "```\n解除週期鎖定：\n編號：X\n```",
     "**查詢本週鎖定**（也可打「查詢鎖定」）— 列出本週（週四~下週三）所有鎖定，含來源標註",
     "**查詢週期鎖定** — 列出所有週期規則跟編號",
+    "**建立測試討論串** — 指定任意日期（不受未來7天限制）建立獨立測試用討論串",
+    "```\n建立測試討論串：\n日期：YYYY-MM-DD\n```",
+    "**刪除測試討論串** — 整串刪除測試討論串跟相關資料",
+    "```\n刪除測試討論串：\n日期：YYYY-MM-DD\n```",
     "**功能查詢** — 顯示這份說明",
   ].join("\n");
 

@@ -188,6 +188,20 @@ export function markSummaryLocked(bookingDate) {
   db.prepare(`UPDATE daily_summary SET locked = 1 WHERE booking_date = ?`).run(bookingDate);
 }
 
+// 完全刪掉某個日期的討論串紀錄（daily_summary 那一列），只給測試討論串清理用，
+// 正常營運中的日期不會用到這個（過期的討論串是用 markSummaryLocked 標記鎖定，不是刪除）
+export function deleteSummaryMessage(bookingDate) {
+  db.prepare(`DELETE FROM daily_summary WHERE booking_date = ?`).run(bookingDate);
+}
+
+export function deleteAllSummaryPages(bookingDate) {
+  db.prepare(`DELETE FROM summary_pages WHERE booking_date = ?`).run(bookingDate);
+}
+
+export function deleteBookingsByDate(bookingDate) {
+  db.prepare(`DELETE FROM bookings WHERE booking_date = ?`).run(bookingDate);
+}
+
 // ---- 班表分頁訊息（page_index >= 1，page 0 記錄在 daily_summary） ----
 
 export function getSummaryPages(bookingDate) {

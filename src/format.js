@@ -167,6 +167,8 @@ export function isBookingAttempt(content) {
 export function getAdminCommandType(content) {
   const firstLine = (content || "").trim().split("\n")[0].trim();
   if (/^功能查詢/.test(firstLine)) return "help";
+  if (/^建立測試討論串/.test(firstLine)) return "create_test_thread";
+  if (/^刪除測試討論串/.test(firstLine)) return "delete_test_thread";
   if (/^解除週期鎖定/.test(firstLine)) return "unblock_recurring";
   if (/^解除鎖定/.test(firstLine)) return "unblock";
   if (/^查詢週期鎖定/.test(firstLine)) return "list_recurring";
@@ -196,6 +198,13 @@ export function parseBlockCommand(content) {
 export function parseUnblockCommand(content) {
   const m = (content || "").match(/編號[:：]\s*(\d+)/);
   return { id: m ? Number(m[1]) : null };
+}
+
+// 解析「建立測試討論串」「刪除測試討論串」指令：完整日期 YYYY-MM-DD（不像 MM/DD 那樣預設今年，
+// 這樣才能指定很久以後的日期做測試，不受未來 7 天範圍限制）
+export function parseTestThreadCommand(content) {
+  const m = (content || "").match(/日期[:：]\s*(\d{4}-\d{2}-\d{2})/);
+  return { date: m ? m[1] : null };
 }
 
 // 解析「週期鎖定」指令：星期／開始／結束／原因
