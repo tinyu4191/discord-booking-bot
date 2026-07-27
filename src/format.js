@@ -94,10 +94,12 @@ function formatBookingLine(b) {
   return `🕒${b.scheduled_time} 📍${b.location} 🔀${b.channel || "當日決定"} 👤<@${b.booker_id}>${proxyLine}`;
 }
 
-const SUMMARY_LINE_SEPARATOR = "\n";
-// Discord embed description 上限是 4096 字元，但實測發現內容太長時 Discord 用戶端偶爾會有顯示異常
-// （伺服器端資料其實完整，純粹畫面渲染問題），所以抓更保守的門檻，降低觸發機率
-const MAX_SUMMARY_DESCRIPTION_LENGTH = 2000;
+// 每筆之間留一個空白行，方便閱讀又只多佔 1 個字元（比原本的裝飾分隔線省很多）
+const SUMMARY_LINE_SEPARATOR = "\n\n";
+// Discord embed description 上限是 4096 字元，但實測發現內容偏長時 Discord 用戶端偶爾會有顯示異常
+// （伺服器端資料其實完整，純粹畫面渲染問題，且問題似乎固定發生在內容尾端附近），
+// 所以抓更保守的門檻，降低觸發機率
+const MAX_SUMMARY_DESCRIPTION_LENGTH = 1500;
 
 // 把預約清單依照長度上限切成多頁，確保每一頁的 embed description 都不會超過 Discord 限制。
 // 沒有預約時也會回傳一個空陣列的頁面，讓呼叫端能正常顯示「目前尚無預約」
