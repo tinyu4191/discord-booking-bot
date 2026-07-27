@@ -91,7 +91,9 @@ export function isWithinBlockedSlot(minutes, slot) {
 // 這樣同樣的字元預算能塞進更多筆，降低分頁門檻後也不容易一般日子就爆頁
 function formatBookingLine(b) {
   const proxyLine = b.proxy_for ? ` (代約: ${b.proxy_for})` : "";
-  return `🕒 ${b.scheduled_time}　📍 ${b.location}　🔀 ${b.channel || "當日決定"}　👤 <@${b.booker_id}>${proxyLine}`;
+  // 時間跟頻道用行內程式碼格式（反引號）包起來，這兩欄會變成等寬字型比較好對齊；
+  // 地點、mention 維持一般文字（mention 一旦被包進反引號裡就會失效，變成純文字看不出是誰）
+  return `🕒 \`${b.scheduled_time}\`　📍 ${b.location}　🔀 \`${b.channel || "當日決定"}\`　👤 <@${b.booker_id}>${proxyLine}`;
 }
 
 // 每筆之間留一個空白行，方便閱讀又只多佔 1 個字元（比原本的裝飾分隔線省很多）
