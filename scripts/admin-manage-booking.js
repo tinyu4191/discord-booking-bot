@@ -54,13 +54,13 @@ function printUsage() {
   console.log('  sqlite3 bookings.db "SELECT id, location, scheduled_time, channel, booker_id, status FROM bookings WHERE booking_date=\'2026-07-14\' ORDER BY scheduled_time;"');
 }
 
-async function refreshSummaryMessage(client, bookingDate) {
-  const summaryRow = getSummaryMessage(bookingDate);
+async function refreshSummaryMessage(client, guildId, bookingDate) {
+  const summaryRow = getSummaryMessage(guildId, bookingDate);
   if (!summaryRow) {
     console.warn(`找不到 ${bookingDate} 的討論串紀錄，沒辦法更新統計 embed。`);
     return;
   }
-  const bookings = getConfirmedBookingsByDate(bookingDate);
+  const bookings = getConfirmedBookingsByDate(guildId, bookingDate);
   const embed = buildSummaryEmbed(bookingDate, bookings);
   const thread = await client.channels.fetch(summaryRow.channel_id);
   const msg = await thread.messages.fetch(summaryRow.message_id);
@@ -107,7 +107,7 @@ async function main() {
         console.log(`已更新 id=${id}：`, updated);
       }
 
-      await refreshSummaryMessage(client, booking.booking_date);
+      await refreshSummaryMessage(client, booking.guild_id, booking.booking_date);
     } catch (err) {
       console.error("操作失敗：", err);
     } finally {

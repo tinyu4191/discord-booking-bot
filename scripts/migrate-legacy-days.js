@@ -13,6 +13,11 @@ import { Client, GatewayIntentBits } from "discord.js";
 import { insertBooking, getConfirmedBookingsByDate, getSummaryMessage } from "../src/db.js";
 import { buildSummaryEmbed } from "../src/format.js";
 
+// 這支腳本是當初搬遷你原本語音群舊資料時用的一次性工具，已經完成任務。
+// 如果之後要幫「新」語音群搬類似的舊資料，把下面這個 GUILD_ID 換成新語音群的 guild_id，
+// 並把 LEGACY_DAYS 換成那個語音群的舊資料再執行。
+const GUILD_ID = "你的語音群guild_id";
+
 // 每個日期一組資料，proxyFor 沒有的填 null
 // 沒有記錄到具體代約遊戲ID的（例如舊資料只寫「代約」兩個字沒附名字），proxyFor 一律填 null
 const LEGACY_DAYS = {
@@ -71,7 +76,7 @@ const LEGACY_DAYS = {
 };
 
 async function migrateDay(client, bookingDate, entries) {
-  const summaryRow = getSummaryMessage(bookingDate);
+  const summaryRow = getSummaryMessage(GUILD_ID, bookingDate);
   if (!summaryRow) {
     console.warn(`找不到 ${bookingDate} 的討論串紀錄，跳過這天（可能該日期的討論串還沒被自動建立）。`);
     return;
@@ -101,7 +106,7 @@ async function migrateDay(client, bookingDate, entries) {
 
   console.log(`${bookingDate}：新寫入 ${inserted} / ${entries.length} 筆`);
 
-  const bookings = getConfirmedBookingsByDate(bookingDate);
+  const bookings = getConfirmedBookingsByDate(GUILD_ID, bookingDate);
   const embed = buildSummaryEmbed(bookingDate, bookings);
   const msg = await thread.messages.fetch(summaryRow.message_id);
   await msg.edit({ embeds: [embed] });

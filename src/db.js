@@ -3,7 +3,19 @@ import Database from "better-sqlite3";
 const db = new Database("bookings.db");
 db.pragma("journal_mode = WAL");
 
-// 預約主表：每一筆預約對應到討論串裡的一則留言（message_id）
+// 每個語音群各自的頻道設定（取代原本寫死在 .env 的四個頻道 ID）
+db.exec(`
+  CREATE TABLE IF NOT EXISTS guild_settings (
+    guild_id                   TEXT PRIMARY KEY,
+    booking_parent_channel_id  TEXT NOT NULL,  -- 預約區，機器人在這裡開每日討論串
+    admin_channel_id           TEXT,           -- 選填，機器人紀錄用
+    management_channel_id      TEXT,           -- 管理員下鎖定指令的頻道
+    announcement_channel_id    TEXT,           -- 選填，@everyone 公告頻道
+    created_at                 TEXT NOT NULL DEFAULT (datetime('now'))
+  )
+`);
+
+// 預約主表：每一筆預約對應到討論串裡的一則留言（message_id），guild_id 區分是哪個語音群的資料
 db.exec(`
   CREATE TABLE IF NOT EXISTS bookings (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -14,40 +26,41 @@ db.exec(`
     scheduled_time TEXT NOT NULL,
     channel       TEXT,                  -- 遊戲頻道，可能是「當日決定」或空字串
     booker_id     TEXT NOT NULL,         -- 留言者的 Discord user id
-    proxy_for     TEXT,                  -- 若為代約，填代約對象（目前討論串格式尚未使用）
+    proxy_for     TEXT,                  -- 若為代約，填代約對象
     status        TEXT NOT NULL DEFAULT 'confirmed',
     fee           INTEGER,               -- 之後結算費用用，先留空
     created_at    TEXT NOT NULL DEFAULT (datetime('now'))
   )
 `);
 
-// 記錄每天討論串 + 統計訊息(starter message)的 id，方便之後查找與編輯
+// 記錄每個語音群、每天討論串 + 統計訊息(starter message，第 0 頁) 的 id
 db.exec(`
   CREATE TABLE IF NOT EXISTS daily_summary (
-    booking_date TEXT PRIMARY KEY,
+    guild_id     TEXT NOT NULL,
+    booking_date TEXT NOT NULL,
     channel_id   TEXT NOT NULL,  -- 討論串(thread) id
-    message_id   TEXT NOT NULL,  -- 統計訊息(starter message，也就是第 0 頁) id
-    locked       INTEGER NOT NULL DEFAULT 0  -- 是否已被自動鎖定/封存
+    message_id   TEXT NOT NULL,  -- 統計訊息(starter message，第 0 頁) id
+    locked       INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (guild_id, booking_date)
   )
 `);
 
-// 當某天預約筆數多到讓班表 embed 超過 Discord 4096 字元上限時，多出來的部分會拆到額外分頁訊息，
-// 記錄在這裡（page_index 從 1 開始，0 是 daily_summary 裡記錄的那則主訊息）
+// 當某天預約筆數多到讓班表 embed 超過長度上限時，多出來的部分會拆到額外分頁訊息
 db.exec(`
   CREATE TABLE IF NOT EXISTS summary_pages (
+    guild_id     TEXT NOT NULL,
     booking_date TEXT NOT NULL,
     page_index   INTEGER NOT NULL,
     message_id   TEXT NOT NULL,
-    PRIMARY KEY (booking_date, page_index)
+    PRIMARY KEY (guild_id, booking_date, page_index)
   )
 `);
 
-// 記錄「某天某時段不開放預約」的設定。source_recurring_id 若不為空，代表這筆是
-// 從某條週期鎖定樣板（recurring_blocked_slots）自動產生出來的，方便追蹤來源，
-// 但解除時跟手動建立的一次性鎖定完全一樣，都是同一套「解除鎖定：編號：X」指令
+// 記錄「某語音群、某天某時段不開放預約」的設定
 db.exec(`
   CREATE TABLE IF NOT EXISTS blocked_slots (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id            TEXT NOT NULL,
     booking_date        TEXT NOT NULL,
     start_time          TEXT NOT NULL,  -- HH:MM
     end_time            TEXT NOT NULL,  -- HH:MM
@@ -57,18 +70,11 @@ db.exec(`
   )
 `);
 
-// 舊版資料庫沒有 source_recurring_id 欄位時，自動補上（安全、可重複執行）
-const blockedSlotsColumns = db.prepare(`PRAGMA table_info(blocked_slots)`).all().map((c) => c.name);
-if (!blockedSlotsColumns.includes("source_recurring_id")) {
-  db.exec(`ALTER TABLE blocked_slots ADD COLUMN source_recurring_id INTEGER`);
-}
-
-// 週期鎖定「樣板」：每週固定星期幾的某個時段不開放（例如每週五晚上固定休息）。
-// 這張表本身不會直接拿來擋預約——實際擋預約用的是 blocked_slots 裡自動產生出來的那些一次性紀錄，
-// 樣板只在每天建立新討論串時，被拿來檢查「今天要不要自動產生一筆單次鎖定」
+// 週期鎖定「樣板」：每個語音群各自的每週固定星期幾時段設定，互不影響
 db.exec(`
   CREATE TABLE IF NOT EXISTS recurring_blocked_slots (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id   TEXT NOT NULL,
     weekday    INTEGER NOT NULL,  -- 0=週日 ... 6=週六
     start_time TEXT NOT NULL,
     end_time   TEXT NOT NULL,
@@ -77,20 +83,47 @@ db.exec(`
   )
 `);
 
+// ---- 語音群設定 ----
+
+export function upsertGuildSettings(guildId, { bookingParentChannelId, adminChannelId, managementChannelId, announcementChannelId }) {
+  db.prepare(`
+    INSERT INTO guild_settings (guild_id, booking_parent_channel_id, admin_channel_id, management_channel_id, announcement_channel_id)
+    VALUES (@guildId, @bookingParentChannelId, @adminChannelId, @managementChannelId, @announcementChannelId)
+    ON CONFLICT(guild_id) DO UPDATE SET
+      booking_parent_channel_id = excluded.booking_parent_channel_id,
+      admin_channel_id = excluded.admin_channel_id,
+      management_channel_id = excluded.management_channel_id,
+      announcement_channel_id = excluded.announcement_channel_id
+  `).run({
+    guildId,
+    bookingParentChannelId,
+    adminChannelId: adminChannelId || null,
+    managementChannelId: managementChannelId || null,
+    announcementChannelId: announcementChannelId || null,
+  });
+}
+
+export function getGuildSettings(guildId) {
+  return db.prepare(`SELECT * FROM guild_settings WHERE guild_id = ?`).get(guildId);
+}
+
+export function getAllGuildSettings() {
+  return db.prepare(`SELECT * FROM guild_settings`).all();
+}
+
+export function deleteGuildSettings(guildId) {
+  db.prepare(`DELETE FROM guild_settings WHERE guild_id = ?`).run(guildId);
+}
+
+// ---- 預約 ----
+
 export function insertBooking({ guildId, bookingDate, messageId, location, time, channel, bookerId, proxyFor }) {
   const stmt = db.prepare(`
     INSERT INTO bookings (guild_id, booking_date, message_id, location, scheduled_time, channel, booker_id, proxy_for)
     VALUES (@guildId, @bookingDate, @messageId, @location, @time, @channel, @bookerId, @proxyFor)
   `);
   const result = stmt.run({
-    guildId,
-    bookingDate,
-    messageId,
-    location,
-    time,
-    channel,
-    bookerId,
-    proxyFor: proxyFor || null,
+    guildId, bookingDate, messageId, location, time, channel, bookerId, proxyFor: proxyFor || null,
   });
   return result.lastInsertRowid;
 }
@@ -99,7 +132,6 @@ export function getBookingByMessageId(messageId) {
   return db.prepare(`SELECT * FROM bookings WHERE message_id = ?`).get(messageId);
 }
 
-// 依內部 id 查詢/更新/刪除，給人工後台管理用（例如處理沒有對應真實留言的舊資料）
 export function getBookingById(id) {
   return db.prepare(`SELECT * FROM bookings WHERE id = ?`).get(id);
 }
@@ -115,23 +147,20 @@ export function deleteBookingById(id) {
   db.prepare(`DELETE FROM bookings WHERE id = ?`).run(id);
 }
 
-// 軟刪除：狀態改成 cancelled，資料還在、不會顯示在班表上，之後可以復原
 export function cancelBookingById(id) {
   db.prepare(`UPDATE bookings SET status = 'cancelled' WHERE id = ?`).run(id);
 }
 
-// 復原：把 cancelled 的預約狀態改回 confirmed，重新出現在班表上
 export function restoreBookingById(id) {
   db.prepare(`UPDATE bookings SET status = 'confirmed' WHERE id = ?`).run(id);
 }
 
-// 查某天所有被取消（軟刪除）的預約，方便找出要復原的 id
-export function getCancelledBookingsByDate(bookingDate) {
+export function getCancelledBookingsByDate(guildId, bookingDate) {
   return db.prepare(`
     SELECT * FROM bookings
-    WHERE booking_date = ? AND status = 'cancelled'
+    WHERE guild_id = ? AND booking_date = ? AND status = 'cancelled'
     ORDER BY scheduled_time ASC, id ASC
-  `).all(bookingDate);
+  `).all(guildId, bookingDate);
 }
 
 export function updateBookingFromMessage(messageId, { location, time, channel, proxyFor }) {
@@ -145,105 +174,104 @@ export function deleteBookingByMessageId(messageId) {
   db.prepare(`DELETE FROM bookings WHERE message_id = ?`).run(messageId);
 }
 
-export function getBookingsByDate(bookingDate) {
+export function getBookingsByDate(guildId, bookingDate) {
   return db.prepare(`
     SELECT * FROM bookings
-    WHERE booking_date = ? AND status = 'confirmed'
-  `).all(bookingDate);
+    WHERE guild_id = ? AND booking_date = ? AND status = 'confirmed'
+  `).all(guildId, bookingDate);
 }
 
-export function getConfirmedBookingsByDate(bookingDate) {
+export function getConfirmedBookingsByDate(guildId, bookingDate) {
   return db.prepare(`
     SELECT * FROM bookings
-    WHERE booking_date = ? AND status = 'confirmed'
+    WHERE guild_id = ? AND booking_date = ? AND status = 'confirmed'
     ORDER BY scheduled_time ASC, id ASC
-  `).all(bookingDate);
+  `).all(guildId, bookingDate);
 }
 
-export function getSummaryMessage(bookingDate) {
-  return db.prepare(`SELECT * FROM daily_summary WHERE booking_date = ?`).get(bookingDate);
+export function getSummaryMessage(guildId, bookingDate) {
+  return db.prepare(`SELECT * FROM daily_summary WHERE guild_id = ? AND booking_date = ?`).get(guildId, bookingDate);
 }
 
+// thread id 在整個 Discord 是全域唯一的，不需要另外帶 guildId 也能查到正確的一筆
 export function getSummaryByThreadId(threadId) {
   return db.prepare(`SELECT * FROM daily_summary WHERE channel_id = ?`).get(threadId);
 }
 
-export function setSummaryMessage(bookingDate, channelId, messageId) {
+export function setSummaryMessage(guildId, bookingDate, channelId, messageId) {
   db.prepare(`
-    INSERT INTO daily_summary (booking_date, channel_id, message_id)
-    VALUES (?, ?, ?)
-    ON CONFLICT(booking_date) DO UPDATE SET channel_id = excluded.channel_id, message_id = excluded.message_id
-  `).run(bookingDate, channelId, messageId);
+    INSERT INTO daily_summary (guild_id, booking_date, channel_id, message_id)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(guild_id, booking_date) DO UPDATE SET channel_id = excluded.channel_id, message_id = excluded.message_id
+  `).run(guildId, bookingDate, channelId, messageId);
 }
 
-// 日期已過去、但還沒被鎖定的討論串（供每日排程鎖定用）
-export function getUnlockedPastSummaries(todayStr) {
+export function getUnlockedPastSummaries(guildId, todayStr) {
   return db.prepare(`
     SELECT * FROM daily_summary
-    WHERE booking_date < ? AND locked = 0
-  `).all(todayStr);
+    WHERE guild_id = ? AND booking_date < ? AND locked = 0
+  `).all(guildId, todayStr);
 }
 
-export function markSummaryLocked(bookingDate) {
-  db.prepare(`UPDATE daily_summary SET locked = 1 WHERE booking_date = ?`).run(bookingDate);
+export function markSummaryLocked(guildId, bookingDate) {
+  db.prepare(`UPDATE daily_summary SET locked = 1 WHERE guild_id = ? AND booking_date = ?`).run(guildId, bookingDate);
 }
 
-// 完全刪掉某個日期的討論串紀錄（daily_summary 那一列），只給測試討論串清理用，
-// 正常營運中的日期不會用到這個（過期的討論串是用 markSummaryLocked 標記鎖定，不是刪除）
-export function deleteSummaryMessage(bookingDate) {
-  db.prepare(`DELETE FROM daily_summary WHERE booking_date = ?`).run(bookingDate);
+// 完全刪掉某個語音群、某個日期的討論串紀錄，只給測試討論串清理用
+export function deleteSummaryMessage(guildId, bookingDate) {
+  db.prepare(`DELETE FROM daily_summary WHERE guild_id = ? AND booking_date = ?`).run(guildId, bookingDate);
 }
 
-export function deleteAllSummaryPages(bookingDate) {
-  db.prepare(`DELETE FROM summary_pages WHERE booking_date = ?`).run(bookingDate);
+export function deleteAllSummaryPages(guildId, bookingDate) {
+  db.prepare(`DELETE FROM summary_pages WHERE guild_id = ? AND booking_date = ?`).run(guildId, bookingDate);
 }
 
-export function deleteBookingsByDate(bookingDate) {
-  db.prepare(`DELETE FROM bookings WHERE booking_date = ?`).run(bookingDate);
+export function deleteBookingsByDate(guildId, bookingDate) {
+  db.prepare(`DELETE FROM bookings WHERE guild_id = ? AND booking_date = ?`).run(guildId, bookingDate);
 }
 
 // ---- 班表分頁訊息（page_index >= 1，page 0 記錄在 daily_summary） ----
 
-export function getSummaryPages(bookingDate) {
+export function getSummaryPages(guildId, bookingDate) {
   return db.prepare(`
-    SELECT * FROM summary_pages WHERE booking_date = ? ORDER BY page_index
-  `).all(bookingDate);
+    SELECT * FROM summary_pages WHERE guild_id = ? AND booking_date = ? ORDER BY page_index
+  `).all(guildId, bookingDate);
 }
 
-export function setSummaryPage(bookingDate, pageIndex, messageId) {
+export function setSummaryPage(guildId, bookingDate, pageIndex, messageId) {
   db.prepare(`
-    INSERT INTO summary_pages (booking_date, page_index, message_id)
-    VALUES (?, ?, ?)
-    ON CONFLICT(booking_date, page_index) DO UPDATE SET message_id = excluded.message_id
-  `).run(bookingDate, pageIndex, messageId);
+    INSERT INTO summary_pages (guild_id, booking_date, page_index, message_id)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(guild_id, booking_date, page_index) DO UPDATE SET message_id = excluded.message_id
+  `).run(guildId, bookingDate, pageIndex, messageId);
 }
 
-export function deleteSummaryPage(bookingDate, pageIndex) {
-  db.prepare(`DELETE FROM summary_pages WHERE booking_date = ? AND page_index = ?`).run(bookingDate, pageIndex);
+export function deleteSummaryPage(guildId, bookingDate, pageIndex) {
+  db.prepare(`DELETE FROM summary_pages WHERE guild_id = ? AND booking_date = ? AND page_index = ?`).run(guildId, bookingDate, pageIndex);
 }
 
 // ---- 鎖定時段（不開放預約）相關 ----
 
-export function insertBlockedSlot({ bookingDate, startTime, endTime, reason, sourceRecurringId }) {
+export function insertBlockedSlot({ guildId, bookingDate, startTime, endTime, reason, sourceRecurringId }) {
   const stmt = db.prepare(`
-    INSERT INTO blocked_slots (booking_date, start_time, end_time, reason, source_recurring_id)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO blocked_slots (guild_id, booking_date, start_time, end_time, reason, source_recurring_id)
+    VALUES (?, ?, ?, ?, ?, ?)
   `);
-  const result = stmt.run(bookingDate, startTime, endTime, reason || null, sourceRecurringId || null);
+  const result = stmt.run(guildId, bookingDate, startTime, endTime, reason || null, sourceRecurringId || null);
   return result.lastInsertRowid;
 }
 
-export function getBlockedSlotsByDate(bookingDate) {
+export function getBlockedSlotsByDate(guildId, bookingDate) {
   return db.prepare(`
-    SELECT * FROM blocked_slots WHERE booking_date = ? ORDER BY start_time
-  `).all(bookingDate);
+    SELECT * FROM blocked_slots WHERE guild_id = ? AND booking_date = ? ORDER BY start_time
+  `).all(guildId, bookingDate);
 }
 
 // 查同一天、同時段有沒有已經存在的鎖定紀錄，用來避免週期鎖定重複產生同一筆
-export function getBlockedSlotByDateTimeRange(bookingDate, startTime, endTime) {
+export function getBlockedSlotByDateTimeRange(guildId, bookingDate, startTime, endTime) {
   return db.prepare(`
-    SELECT * FROM blocked_slots WHERE booking_date = ? AND start_time = ? AND end_time = ?
-  `).get(bookingDate, startTime, endTime);
+    SELECT * FROM blocked_slots WHERE guild_id = ? AND booking_date = ? AND start_time = ? AND end_time = ?
+  `).get(guildId, bookingDate, startTime, endTime);
 }
 
 // 查某條週期鎖定樣板，目前已經產生過哪些一次性鎖定（用於樣板刪除時一併清理）
@@ -253,11 +281,11 @@ export function getBlockedSlotsBySourceRecurringId(sourceRecurringId) {
   `).all(sourceRecurringId);
 }
 
-// 查詢所有鎖定時段（不分日期），過期與否由呼叫端依「現在時間」判斷後過濾
-export function getAllBlockedSlots() {
+// 查詢某語音群所有鎖定時段（不分日期），過期與否由呼叫端依「現在時間」判斷後過濾
+export function getAllBlockedSlots(guildId) {
   return db.prepare(`
-    SELECT * FROM blocked_slots ORDER BY booking_date, start_time
-  `).all();
+    SELECT * FROM blocked_slots WHERE guild_id = ? ORDER BY booking_date, start_time
+  `).all(guildId);
 }
 
 export function getBlockedSlotById(id) {
@@ -270,25 +298,25 @@ export function deleteBlockedSlot(id) {
 
 // ---- 週期鎖定樣板 ----
 
-export function insertRecurringBlockedSlot({ weekday, startTime, endTime, reason }) {
+export function insertRecurringBlockedSlot({ guildId, weekday, startTime, endTime, reason }) {
   const stmt = db.prepare(`
-    INSERT INTO recurring_blocked_slots (weekday, start_time, end_time, reason)
-    VALUES (?, ?, ?, ?)
+    INSERT INTO recurring_blocked_slots (guild_id, weekday, start_time, end_time, reason)
+    VALUES (?, ?, ?, ?, ?)
   `);
-  const result = stmt.run(weekday, startTime, endTime, reason || null);
+  const result = stmt.run(guildId, weekday, startTime, endTime, reason || null);
   return result.lastInsertRowid;
 }
 
-export function getRecurringBlockedSlotsByWeekday(weekday) {
+export function getRecurringBlockedSlotsByWeekday(guildId, weekday) {
   return db.prepare(`
-    SELECT * FROM recurring_blocked_slots WHERE weekday = ? ORDER BY start_time
-  `).all(weekday);
+    SELECT * FROM recurring_blocked_slots WHERE guild_id = ? AND weekday = ? ORDER BY start_time
+  `).all(guildId, weekday);
 }
 
-export function getAllRecurringBlockedSlots() {
+export function getAllRecurringBlockedSlots(guildId) {
   return db.prepare(`
-    SELECT * FROM recurring_blocked_slots ORDER BY weekday, start_time
-  `).all();
+    SELECT * FROM recurring_blocked_slots WHERE guild_id = ? ORDER BY weekday, start_time
+  `).all(guildId);
 }
 
 export function getRecurringBlockedSlotById(id) {

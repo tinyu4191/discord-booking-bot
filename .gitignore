@@ -25,3 +25,7 @@ npm-debug.log*
 
 # node-gyp 編譯產物
 build/
+
+# tar檔
+*.tar.gz
+*.tar

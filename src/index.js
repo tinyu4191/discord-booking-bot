@@ -2,8 +2,6 @@ import "dotenv/config";
 import { Client, GatewayIntentBits, Partials, Events, ChannelType, AttachmentBuilder } from "discord.js";
 import cron from "node-cron";
 import { existsSync } from "node:fs";
-import fs from "node:fs";
-import http from "node:http";
 import path from "node:path";
 import {
   insertBooking,
@@ -37,8 +35,9 @@ import {
   deleteSummaryMessage,
   deleteAllSummaryPages,
   deleteBookingsByDate,
+  getGuildSettings,
+  getAllGuildSettings,
 } from "./db.js";
-import { generateWeeklyReport, saveReport } from "./report.js";
 import {
   formatGuideText,
   formatThreadTitle,
@@ -75,71 +74,70 @@ const client = new Client({
 // 0=週日 ... 6=週六 對應的星期圖片檔名，請把對應圖片放到 assets/weekday/ 底下
 const WEEKDAY_IMAGE_FILES = ["sun.png", "mon.png", "tue.png", "wed.png", "thu.png", "fri.png", "sat.png"];
 
-// 討論串建立時，預先保留幾頁班表訊息的位置（固定排在討論串前段，不會被之後的聊天夾在中間）。
-// 實際筆數超過這個保留頁數才會用到 refreshSummaryMessage 裡的動態新增機制（那種情況位置就無法保證在前段了）
-// 討論串建立時，預先保留幾頁班表訊息的位置（固定排在討論串前段，不會被之後的聊天夾在中間）。
-// 目前關閉（設成 1 = 不預留），因為代價是每天不管有沒有需要都會多出 2 則幾乎空白的訊息，太干擾。
-// 分頁機制本身還是完整保留：真的筆數多到超過長度上限時，還是會自動動態新增分頁，
-// 只是新增的那則位置無法保證緊接在第一頁後面（可能被夾在後續聊天中間）
+// 討論串建立時，預先保留幾頁班表訊息的位置。目前關閉（設成 1 = 不預留），
+// 分頁機制本身還是完整保留：真的筆數多到超過長度上限時，還是會自動動態新增分頁
 const RESERVED_SUMMARY_PAGES = 1;
 
 client.once(Events.ClientReady, async () => {
   console.log(`已登入：${client.user.tag}`);
-  await ensureUpcomingThreads();
-  await lockPastThreads();
-  // 每天固定時間：補開新的一天 + 鎖定已過期的討論串
+  await ensureUpcomingThreadsForAllGuilds();
+  await lockPastThreadsForAllGuilds();
+  // 每天固定時間：補開新的一天 + 鎖定已過期的討論串（所有已登記的語音群都會跑一次）
   cron.schedule(
     "5 0 * * *",
     async () => {
-      await ensureUpcomingThreads();
-      await lockPastThreads();
-    },
-    { timezone: "Asia/Ho_Chi_Minh" }
-  );
-
-  // 每週四凌晨（新的一週剛開始時）自動產生「剛結束的上一週」統計報告
-  cron.schedule(
-    "15 0 * * 4",
-    () => {
-      try {
-        const today = getBookingDateToday();
-        const { start: currentWeekStart } = getGameWeekRange(today);
-        const lastWeekStart = addDays(currentWeekStart, -7);
-        const report = generateWeeklyReport(lastWeekStart);
-        const filePath = saveReport(report);
-        console.log(`已自動產生上週報告：${filePath}（${report.totalConfirmed} 場）`);
-      } catch (err) {
-        console.error("自動產生週報告失敗：", err);
-      }
+      await ensureUpcomingThreadsForAllGuilds();
+      await lockPastThreadsForAllGuilds();
     },
     { timezone: "Asia/Ho_Chi_Minh" }
   );
 });
 
-// 確保「今天 ~ 今天+6天」這 7 天的討論串都已經建立
-async function ensureUpcomingThreads() {
-  const parent = await client.channels.fetch(process.env.BOOKING_PARENT_CHANNEL_ID);
+async function ensureUpcomingThreadsForAllGuilds() {
+  for (const settings of getAllGuildSettings()) {
+    try {
+      await ensureUpcomingThreads(settings);
+    } catch (err) {
+      console.error(`[${settings.guild_id}] 建立討論串時發生錯誤：`, err);
+    }
+  }
+}
+
+async function lockPastThreadsForAllGuilds() {
+  for (const settings of getAllGuildSettings()) {
+    try {
+      await lockPastThreads(settings);
+    } catch (err) {
+      console.error(`[${settings.guild_id}] 鎖定討論串時發生錯誤：`, err);
+    }
+  }
+}
+
+// 確保某個語音群「今天 ~ 今天+6天」這 7 天的討論串都已經建立
+async function ensureUpcomingThreads(guildSettings) {
+  const guildId = guildSettings.guild_id;
+  const parent = await client.channels.fetch(guildSettings.booking_parent_channel_id);
   const today = getBookingDateToday();
 
   for (let i = 0; i <= 6; i++) {
     const date = addDays(today, i);
-    if (getSummaryMessage(date)) continue;
+    if (getSummaryMessage(guildId, date)) continue;
 
     const title = formatThreadTitle(date);
     const existing = await findExistingThreadByName(parent, title);
 
     if (existing) {
-      const linked = await reuseExistingThread(existing, date);
+      const linked = await reuseExistingThread(existing, guildId, date);
       if (linked) {
-        console.log(`發現既有討論串，已重新連結：${date}`);
-        await logToAdmin(`🔗 發現既有討論串，已重新連結：${title}`);
+        console.log(`[${guildId}] 發現既有討論串，已重新連結：${date}`);
+        await logToAdmin(guildSettings, `🔗 發現既有討論串，已重新連結：${title}`);
       } else {
-        console.warn(`找到同名討論串「${title}」，但抓不到統計訊息，略過（可能要手動處理）`);
+        console.warn(`[${guildId}] 找到同名討論串「${title}」，但抓不到統計訊息，略過（可能要手動處理）`);
       }
       continue;
     }
 
-    await createDailyThread(parent, date);
+    await createDailyThread(parent, guildId, date);
   }
 }
 
@@ -159,12 +157,12 @@ async function findExistingThreadByName(parent, name) {
 }
 
 // 找到既有討論串時，從裡面已置頂的 embed 訊息重新連結，不重新建立新的統計訊息
-async function reuseExistingThread(thread, bookingDate) {
+async function reuseExistingThread(thread, guildId, bookingDate) {
   try {
     const pinned = await thread.messages.fetchPinned();
     const statsMsg = pinned.find((m) => m.embeds.length > 0);
     if (!statsMsg) return false;
-    setSummaryMessage(bookingDate, thread.id, statsMsg.id);
+    setSummaryMessage(guildId, bookingDate, thread.id, statsMsg.id);
     return true;
   } catch (err) {
     console.warn(`重新連結討論串失敗 (${bookingDate})：`, err.message);
@@ -172,21 +170,22 @@ async function reuseExistingThread(thread, bookingDate) {
   }
 }
 
-// 把日期已經過去、還沒被鎖定的討論串鎖定 + 封存（不刪除）
-async function lockPastThreads() {
+// 把某個語音群「日期已經過去、還沒被鎖定」的討論串鎖定 + 封存（不刪除）
+async function lockPastThreads(guildSettings) {
+  const guildId = guildSettings.guild_id;
   const today = getBookingDateToday();
-  const rows = getUnlockedPastSummaries(today);
+  const rows = getUnlockedPastSummaries(guildId, today);
 
   for (const row of rows) {
     try {
       const thread = await client.channels.fetch(row.channel_id);
       await thread.setLocked(true, "已過期，自動鎖定");
       await thread.setArchived(true, "已過期，自動封存");
-      markSummaryLocked(row.booking_date);
-      console.log(`已鎖定討論串：${row.booking_date}`);
-      await logToAdmin(`🔒 已鎖定討論串：${formatThreadTitle(row.booking_date)}`);
+      markSummaryLocked(guildId, row.booking_date);
+      console.log(`[${guildId}] 已鎖定討論串：${row.booking_date}`);
+      await logToAdmin(guildSettings, `🔒 已鎖定討論串：${formatThreadTitle(row.booking_date)}`);
     } catch (err) {
-      console.warn(`鎖定討論串失敗 (${row.booking_date})：`, err.message);
+      console.warn(`[${guildId}] 鎖定討論串失敗 (${row.booking_date})：`, err.message);
     }
   }
 }
@@ -212,14 +211,13 @@ function buildAnnouncementAttachment(fileName) {
 }
 
 // 依鎖定原因挑選公告要附的圖片：原因裡有「出征蝴蝶王」就換成專屬圖，其他一律用預設的 lock.png
-// reasons 可以是單一原因字串，也可以是一組原因（多筆鎖定同時公告時，只要其中一個符合就換圖）
 function pickLockAnnouncementImage(reasons) {
   const reasonList = Array.isArray(reasons) ? reasons : [reasons];
   const isButterflyKing = reasonList.some((r) => r && r.includes("出征蝴蝶王"));
   return buildAnnouncementAttachment(isButterflyKing ? "butterfly-king.png" : "lock.png");
 }
 
-async function createDailyThread(parent, bookingDate) {
+async function createDailyThread(parent, guildId, bookingDate) {
   const guideText = formatGuideText(bookingDate);
   const attachment = buildWeekdayAttachment(bookingDate);
   const files = attachment ? [attachment] : [];
@@ -229,7 +227,6 @@ async function createDailyThread(parent, bookingDate) {
   let guideMsg;
 
   if (isForum) {
-    // 論壇頻道：建立討論串時「必須」同時附上第一則訊息
     thread = await parent.threads.create({
       name: formatThreadTitle(bookingDate),
       autoArchiveDuration: 10080,
@@ -238,7 +235,6 @@ async function createDailyThread(parent, bookingDate) {
     });
     guideMsg = await thread.fetchStarterMessage();
   } else {
-    // 一般文字頻道：先建立空討論串，再發第一則訊息
     thread = await parent.threads.create({
       name: formatThreadTitle(bookingDate),
       autoArchiveDuration: 10080,
@@ -249,38 +245,37 @@ async function createDailyThread(parent, bookingDate) {
   }
   await guideMsg.pin().catch((err) => console.warn("置頂失敗（可能缺少 Manage Messages 權限）：", err.message));
 
-  // 班表用獨立的 embed 訊息呈現，跟上面的說明分開，比較顯眼。
-  // 一開始就把保留的分頁位置都建立好（見 RESERVED_SUMMARY_PAGES），
-  // 這樣不管之後筆數怎麼變化，這些訊息永遠固定在討論串前段，不會被之後的聊天訊息夾在中間
   const statsEmbed = buildSummaryEmbed(bookingDate, [], 0, RESERVED_SUMMARY_PAGES);
   const statsMsg = await thread.send({ embeds: [statsEmbed] });
   await statsMsg.pin().catch((err) => console.warn("置頂失敗（可能缺少 Manage Messages 權限）：", err.message));
-  setSummaryMessage(bookingDate, thread.id, statsMsg.id);
+  setSummaryMessage(guildId, bookingDate, thread.id, statsMsg.id);
 
   for (let i = 1; i < RESERVED_SUMMARY_PAGES; i++) {
     const pageEmbed = buildSummaryEmbed(bookingDate, [], i, RESERVED_SUMMARY_PAGES);
     const pageMsg = await thread.send({ embeds: [pageEmbed] });
     await pageMsg.pin().catch((err) => console.warn("置頂失敗（可能缺少 Manage Messages 權限）：", err.message));
-    setSummaryPage(bookingDate, i, pageMsg.id);
+    setSummaryPage(guildId, bookingDate, i, pageMsg.id);
   }
 
-  console.log(`已建立討論串：${bookingDate}`);
-  await logToAdmin(`🧵 已建立討論串：${formatThreadTitle(bookingDate)}`);
+  console.log(`[${guildId}] 已建立討論串：${bookingDate}`);
+  const guildSettings = getGuildSettings(guildId);
+  await logToAdmin(guildSettings, `🧵 已建立討論串：${formatThreadTitle(bookingDate)}`);
 
-  await materializeRecurringBlocksForDate(bookingDate);
-  await announceBlockedSlotsForNewThread(bookingDate);
+  await materializeRecurringBlocksForDate(guildId, bookingDate);
+  await announceBlockedSlotsForNewThread(guildSettings, bookingDate);
 }
 
 // 依週期鎖定樣板，把「今天符合星期幾的樣板」自動轉成一筆單次鎖定紀錄。
 // 如果同一天同時段已經有人手動先設定過一次性鎖定，就不會重複產生。
-async function materializeRecurringBlocksForDate(bookingDate) {
+async function materializeRecurringBlocksForDate(guildId, bookingDate) {
   const weekday = getWeekdayIndex(bookingDate);
-  const templates = getRecurringBlockedSlotsByWeekday(weekday);
+  const templates = getRecurringBlockedSlotsByWeekday(guildId, weekday);
 
   for (const tpl of templates) {
-    const existing = getBlockedSlotByDateTimeRange(bookingDate, tpl.start_time, tpl.end_time);
+    const existing = getBlockedSlotByDateTimeRange(guildId, bookingDate, tpl.start_time, tpl.end_time);
     if (existing) continue;
     insertBlockedSlot({
+      guildId,
       bookingDate,
       startTime: tpl.start_time,
       endTime: tpl.end_time,
@@ -291,8 +286,8 @@ async function materializeRecurringBlocksForDate(bookingDate) {
 }
 
 // 討論串一建立，掃描當天有沒有鎖定時段（含週期樣板剛產生出來的），有的話同步公告
-async function announceBlockedSlotsForNewThread(bookingDate) {
-  const allSlots = getBlockedSlotsByDate(bookingDate);
+async function announceBlockedSlotsForNewThread(guildSettings, bookingDate) {
+  const allSlots = getBlockedSlotsByDate(guildSettings.guild_id, bookingDate);
   if (!allSlots.length) return;
 
   const lines = allSlots
@@ -302,14 +297,18 @@ async function announceBlockedSlotsForNewThread(bookingDate) {
 
   const announcement = `@everyone 📢 ${formatThreadTitle(bookingDate)} 已開放，以下時段目前不開放預約：\n${lines.join("\n")}`;
   const lockImage = pickLockAnnouncementImage(allSlots.map((s) => s.reason));
-  await sendAnnouncement(announcement, lockImage ? [lockImage] : []);
+  await sendAnnouncement(guildSettings, announcement, lockImage ? [lockImage] : []);
 }
 
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot) return;
+  if (!message.guildId) return; // 忽略私訊
 
-  if (message.channelId === process.env.MANAGEMENT_CHANNEL_ID) {
-    await handleAdminCommand(message);
+  const guildSettings = getGuildSettings(message.guildId);
+  if (!guildSettings) return; // 這個語音群還沒被登記，忽略
+
+  if (guildSettings.management_channel_id && message.channelId === guildSettings.management_channel_id) {
+    await handleAdminCommand(message, guildSettings);
     return;
   }
 
@@ -321,6 +320,7 @@ client.on(Events.MessageUpdate, async (oldMessage, newMessage) => {
   try {
     const full = newMessage.partial ? await newMessage.fetch() : newMessage;
     if (full.author.bot) return;
+    if (!full.guildId) return;
     if (!full.channel.isThread()) return;
     await handleBookingMessage(full, { isEdit: true });
   } catch (err) {
@@ -333,7 +333,7 @@ client.on(Events.MessageDelete, async (message) => {
     const booking = getBookingByMessageId(message.id);
     if (!booking) return;
     deleteBookingByMessageId(message.id);
-    await refreshSummaryMessage(booking.booking_date);
+    await refreshSummaryMessage(booking.guild_id, booking.booking_date);
   } catch (err) {
     console.error("處理刪除訊息時發生錯誤：", err);
   }
@@ -344,6 +344,9 @@ async function handleBookingMessage(message, { isEdit }) {
   if (!summaryRow) return; // 不是預約討論串，忽略
   if (message.id === summaryRow.message_id) return; // 忽略統計訊息本身
   if (!isBookingAttempt(message.content)) return; // 不像預約格式（客服對話/閒聊），直接忽略
+
+  const guildId = message.guildId;
+  const guildSettings = getGuildSettings(guildId);
 
   const { location, time, channel, proxyFor } = parseBookingMessage(message.content);
 
@@ -368,7 +371,7 @@ async function handleBookingMessage(message, { isEdit }) {
   const existingBooking = getBookingByMessageId(message.id);
 
   // 鎖定時段檢查：週期鎖定在討論串建立時就已經自動產生對應的單次鎖定紀錄，這裡只需要查單次鎖定表
-  const blockedSlot = getBlockedSlotsByDate(bookingDate).find((slot) => isWithinBlockedSlot(newMinutes, slot));
+  const blockedSlot = getBlockedSlotsByDate(guildId, bookingDate).find((slot) => isWithinBlockedSlot(newMinutes, slot));
   if (blockedSlot) {
     await safeReact(message, "🚫");
     await message
@@ -379,7 +382,7 @@ async function handleBookingMessage(message, { isEdit }) {
     return;
   }
 
-  const conflict = getBookingsByDate(bookingDate).find((b) => {
+  const conflict = getBookingsByDate(guildId, bookingDate).find((b) => {
     if (existingBooking && b.id === existingBooking.id) return false; // 排除自己（編輯情境）
     const mins = timeToMinutes(b.scheduled_time);
     return mins !== null && Math.abs(mins - newMinutes) < 5;
@@ -399,7 +402,7 @@ async function handleBookingMessage(message, { isEdit }) {
     updateBookingFromMessage(message.id, { location, time, channel, proxyFor });
   } else {
     insertBooking({
-      guildId: message.guildId,
+      guildId,
       bookingDate,
       messageId: message.id,
       location,
@@ -412,23 +415,27 @@ async function handleBookingMessage(message, { isEdit }) {
 
   await safeReact(message, "✅");
   try {
-    await refreshSummaryMessage(bookingDate);
+    await refreshSummaryMessage(guildId, bookingDate);
   } catch (err) {
     console.error(`更新班表失敗 (${bookingDate})：`, err);
   }
-  await logToAdmin(
-    `📋 ${isEdit ? "更新" : "新"}預約｜${bookingDate}｜${location} / ${time} / ${channel || "當日決定"}｜<@${message.author.id}>`
-  );
+
+  if (guildSettings) {
+    await logToAdmin(
+      guildSettings,
+      `📋 ${isEdit ? "更新" : "新"}預約｜${bookingDate}｜${location} / ${time} / ${channel || "當日決定"}｜<@${message.author.id}>`
+    );
+  }
 }
 
-// 把公告推播到獨立的公告頻道（跟討論串分開），並確保 @everyone 真的會 ping 到人
-async function sendAnnouncement(text, files = []) {
-  if (!process.env.ANNOUNCEMENT_CHANNEL_ID) {
-    console.warn("沒有設定 ANNOUNCEMENT_CHANNEL_ID，公告訊息略過推播：", text);
+// 把公告推播到某個語音群的公告頻道，並確保 @everyone 真的會 ping 到人
+async function sendAnnouncement(guildSettings, text, files = []) {
+  if (!guildSettings?.announcement_channel_id) {
+    console.warn("這個語音群沒有設定公告頻道，公告訊息略過推播：", text);
     return;
   }
   try {
-    const channel = await client.channels.fetch(process.env.ANNOUNCEMENT_CHANNEL_ID);
+    const channel = await client.channels.fetch(guildSettings.announcement_channel_id);
     await channel.send({ content: text, files, allowedMentions: { parse: ["everyone", "users"] } });
   } catch (err) {
     console.warn("公告推播失敗：", err.message);
@@ -436,35 +443,34 @@ async function sendAnnouncement(text, files = []) {
 }
 
 // 管理頻道指令：一次性鎖定、週期鎖定、查詢、功能說明
-// 其他訊息當一般聊天忽略，不處理也不回覆
-async function handleAdminCommand(message) {
+async function handleAdminCommand(message, guildSettings) {
   const commandType = getAdminCommandType(message.content);
   if (!commandType) return;
 
   if (commandType === "block") {
-    await handleBlockCommand(message);
+    await handleBlockCommand(message, guildSettings);
   } else if (commandType === "unblock") {
-    await handleUnblockCommand(message);
+    await handleUnblockCommand(message, guildSettings);
   } else if (commandType === "list_week") {
-    await handleWeekListCommand(message);
+    await handleWeekListCommand(message, guildSettings);
   } else if (commandType === "block_recurring") {
-    await handleRecurringBlockCommand(message);
+    await handleRecurringBlockCommand(message, guildSettings);
   } else if (commandType === "unblock_recurring") {
-    await handleRecurringUnblockCommand(message);
+    await handleRecurringUnblockCommand(message, guildSettings);
   } else if (commandType === "list_recurring") {
-    await handleRecurringListCommand(message);
+    await handleRecurringListCommand(message, guildSettings);
   } else if (commandType === "create_test_thread") {
-    await handleCreateTestThreadCommand(message);
+    await handleCreateTestThreadCommand(message, guildSettings);
   } else if (commandType === "delete_test_thread") {
-    await handleDeleteTestThreadCommand(message);
+    await handleDeleteTestThreadCommand(message, guildSettings);
   } else {
     await handleHelpCommand(message);
   }
 }
 
-// 「建立測試討論串」指令：不受未來 7 天範圍限制，指定任意日期（含很久以後）建立一個獨立的測試討論串，
-// 完全沿用正式的 createDailyThread 邏輯，所以測試結果跟正式環境行為一致
-async function handleCreateTestThreadCommand(message) {
+// 「建立測試討論串」指令
+async function handleCreateTestThreadCommand(message, guildSettings) {
+  const guildId = guildSettings.guild_id;
   const { date } = parseTestThreadCommand(message.content);
   if (!date) {
     await message
@@ -473,7 +479,7 @@ async function handleCreateTestThreadCommand(message) {
     return;
   }
 
-  if (getSummaryMessage(date)) {
+  if (getSummaryMessage(guildId, date)) {
     await message
       .reply(`${date} 已經有討論串了，不會重複建立。要重測請先用「刪除測試討論串」清掉。`)
       .catch(() => {});
@@ -481,8 +487,8 @@ async function handleCreateTestThreadCommand(message) {
   }
 
   try {
-    const parent = await client.channels.fetch(process.env.BOOKING_PARENT_CHANNEL_ID);
-    await createDailyThread(parent, date);
+    const parent = await client.channels.fetch(guildSettings.booking_parent_channel_id);
+    await createDailyThread(parent, guildId, date);
     await message.reply(`已建立測試討論串：${date}。測試完記得用「刪除測試討論串」清掉，不要留著。`).catch(() => {});
   } catch (err) {
     console.error(`建立測試討論串失敗 (${date})：`, err);
@@ -490,8 +496,9 @@ async function handleCreateTestThreadCommand(message) {
   }
 }
 
-// 「刪除測試討論串」指令：整串刪除（Discord 討論串本身 + daily_summary/summary_pages/bookings 相關資料）
-async function handleDeleteTestThreadCommand(message) {
+// 「刪除測試討論串」指令
+async function handleDeleteTestThreadCommand(message, guildSettings) {
+  const guildId = guildSettings.guild_id;
   const { date } = parseTestThreadCommand(message.content);
   if (!date) {
     await message
@@ -500,7 +507,7 @@ async function handleDeleteTestThreadCommand(message) {
     return;
   }
 
-  const summaryRow = getSummaryMessage(date);
+  const summaryRow = getSummaryMessage(guildId, date);
   if (!summaryRow) {
     await message.reply(`找不到 ${date} 的討論串紀錄。`).catch(() => {});
     return;
@@ -513,20 +520,20 @@ async function handleDeleteTestThreadCommand(message) {
     console.warn(`刪除討論串失敗 (${date})，可能已經被手動刪除：`, err.message);
   }
 
-  deleteAllSummaryPages(date);
-  deleteSummaryMessage(date);
-  deleteBookingsByDate(date);
+  deleteAllSummaryPages(guildId, date);
+  deleteSummaryMessage(guildId, date);
+  deleteBookingsByDate(guildId, date);
 
   await message.reply(`已刪除 ${date} 的測試討論串與相關資料。`).catch(() => {});
 }
 
-// 「查詢本週鎖定」（也接受舊名「查詢鎖定」）：本週定義為週四~下週三。
-// 一次性鎖定跟週期樣板產生出來的鎖定，本質上都是同一張表的紀錄，直接查、統一用 [單次]/[週期#N] 標註來源
-async function handleWeekListCommand(message) {
+// 「查詢本週鎖定」（也接受舊名「查詢鎖定」）：本週定義為週四~下週三
+async function handleWeekListCommand(message, guildSettings) {
+  const guildId = guildSettings.guild_id;
   const today = getBookingDateToday();
   const { start, end } = getGameWeekRange(today);
 
-  const slots = getAllBlockedSlots().filter((s) => s.booking_date >= start && s.booking_date <= end);
+  const slots = getAllBlockedSlots(guildId).filter((s) => s.booking_date >= start && s.booking_date <= end);
 
   if (!slots.length) {
     await message
@@ -556,8 +563,8 @@ async function handleWeekListCommand(message) {
 }
 
 // 「查詢週期鎖定」指令：列出所有每週固定的鎖定設定
-async function handleRecurringListCommand(message) {
-  const slots = getAllRecurringBlockedSlots();
+async function handleRecurringListCommand(message, guildSettings) {
+  const slots = getAllRecurringBlockedSlots(guildSettings.guild_id);
   if (!slots.length) {
     await message.reply("目前沒有任何週期鎖定設定。").catch(() => {});
     return;
@@ -572,8 +579,9 @@ async function handleRecurringListCommand(message) {
   await message.reply(`📋 目前的週期鎖定設定：\n${lines.join("\n")}`).catch(() => {});
 }
 
-// 「週期鎖定」指令：寫入每週固定鎖定 → 掃描未來7天內已存在且符合星期的預約，取消衝突的 → 公告 → 回覆管理頻道
-async function handleRecurringBlockCommand(message) {
+// 「週期鎖定」指令
+async function handleRecurringBlockCommand(message, guildSettings) {
+  const guildId = guildSettings.guild_id;
   const { weekdayInput, start, end, reason } = parseRecurringBlockCommand(message.content);
 
   const weekday = parseWeekdayInput(weekdayInput);
@@ -593,22 +601,20 @@ async function handleRecurringBlockCommand(message) {
     return;
   }
 
-  const templateId = insertRecurringBlockedSlot({ weekday, startTime: start, endTime: end, reason });
+  const templateId = insertRecurringBlockedSlot({ guildId, weekday, startTime: start, endTime: end, reason });
 
-  // 掃描目前已存在討論串的未來 7 天內，符合這個星期幾的日期：
-  // 先產生對應的單次鎖定紀錄（已經有的話不重複），再取消時間衝突的預約
   const today = getBookingDateToday();
   const affectedGroups = [];
   for (let i = 0; i <= 6; i++) {
     const date = addDays(today, i);
     if (getWeekdayIndex(date) !== weekday) continue;
 
-    const existingBlock = getBlockedSlotByDateTimeRange(date, start, end);
+    const existingBlock = getBlockedSlotByDateTimeRange(guildId, date, start, end);
     if (!existingBlock) {
-      insertBlockedSlot({ bookingDate: date, startTime: start, endTime: end, reason, sourceRecurringId: templateId });
+      insertBlockedSlot({ guildId, bookingDate: date, startTime: start, endTime: end, reason, sourceRecurringId: templateId });
     }
 
-    const affected = getBookingsByDate(date).filter((b) => {
+    const affected = getBookingsByDate(guildId, date).filter((b) => {
       const mins = timeToMinutes(b.scheduled_time);
       return mins !== null && isWithinBlockedSlot(mins, { start_time: start, end_time: end });
     });
@@ -618,7 +624,7 @@ async function handleRecurringBlockCommand(message) {
     }
 
     if (affected.length) {
-      await refreshSummaryMessage(date);
+      await refreshSummaryMessage(guildId, date);
       affectedGroups.push({ date, bookings: affected });
     }
   }
@@ -635,18 +641,17 @@ async function handleRecurringBlockCommand(message) {
       `@everyone 📢 公告：每週${weekdayLabel} ${start} ~ ${end} 這個時段固定不開放預約${reasonText}。\n\n` +
       `以下預約因為時段衝突已被系統取消，請重新選擇其他時間登記，造成不便請見諒 🙏\n${lines.join("\n")}`;
     const lockImage = pickLockAnnouncementImage(reason);
-    await sendAnnouncement(announcement, lockImage ? [lockImage] : []);
+    await sendAnnouncement(guildSettings, announcement, lockImage ? [lockImage] : []);
   }
-  // 沒有任何預約受影響時不主動公告，等對應日期的討論串建立時再一併公告（見 announceBlockedSlotsForNewThread）
 
   await message
     .reply(`已設定每週${weekdayLabel} ${start}~${end} 固定鎖定（編號 #${templateId}），取消了 ${totalAffected} 筆衝突的預約。`)
     .catch(() => {});
-  await logToAdmin(`🚫 已設定週期鎖定：每週${weekdayLabel} ${start}~${end}${reasonText}，取消 ${totalAffected} 筆預約`);
+  await logToAdmin(guildSettings, `🚫 已設定週期鎖定：每週${weekdayLabel} ${start}~${end}${reasonText}，取消 ${totalAffected} 筆預約`);
 }
 
-// 「解除週期鎖定」指令：依編號刪除週期鎖定，並公告恢復開放
-async function handleRecurringUnblockCommand(message) {
+// 「解除週期鎖定」指令
+async function handleRecurringUnblockCommand(message, guildSettings) {
   const { id } = parseUnblockCommand(message.content);
   if (!id) {
     await message.reply("請附上要解除的編號，例如：\n```\n解除週期鎖定：\n編號：3\n```").catch(() => {});
@@ -654,7 +659,7 @@ async function handleRecurringUnblockCommand(message) {
   }
 
   const slot = getRecurringBlockedSlotById(id);
-  if (!slot) {
+  if (!slot || slot.guild_id !== guildSettings.guild_id) {
     await message.reply(`找不到編號 #${id} 的週期鎖定設定。`).catch(() => {});
     return;
   }
@@ -662,7 +667,6 @@ async function handleRecurringUnblockCommand(message) {
   deleteRecurringBlockedSlot(id);
   const weekdayLabel = "日一二三四五六"[slot.weekday];
 
-  // 同步清掉這條樣板已經產生出來、還沒過期的單次鎖定，讓「解除」立刻生效，不用等到下週
   const today = getBookingDateToday();
   const materialized = getBlockedSlotsBySourceRecurringId(id).filter((s) => s.booking_date >= today);
   for (const m of materialized) {
@@ -678,14 +682,14 @@ async function handleRecurringUnblockCommand(message) {
 
   const unlockImage = buildAnnouncementAttachment("unlock.png");
   await sendAnnouncement(
+    guildSettings,
     `@everyone 📢 公告：每週${weekdayLabel} ${slot.start_time} ~ ${slot.end_time} 恢復開放預約囉！`,
     unlockImage ? [unlockImage] : []
   );
 
-  await logToAdmin(`✅ 已解除週期鎖定 #${id}（每週${weekdayLabel} ${slot.start_time}~${slot.end_time}）`);
+  await logToAdmin(guildSettings, `✅ 已解除週期鎖定 #${id}（每週${weekdayLabel} ${slot.start_time}~${slot.end_time}）`);
 }
 
-// 「跳過週期鎖定」指令：某條週期規則，這一次（指定日期）先不套用，其他週照常鎖定
 // 「功能查詢」指令：列出管理頻道所有可用指令跟格式
 async function handleHelpCommand(message) {
   const helpText = [
@@ -711,8 +715,9 @@ async function handleHelpCommand(message) {
   await message.reply(helpText).catch(() => {});
 }
 
-// 「鎖定」指令：寫入鎖定時段 → 刪除已衝突的預約 → 討論串發公告 tag 受影響的人 → 回覆管理頻道
-async function handleBlockCommand(message) {
+// 「鎖定」指令
+async function handleBlockCommand(message, guildSettings) {
+  const guildId = guildSettings.guild_id;
   const { date, start, end, reason } = parseBlockCommand(message.content);
 
   const bookingDate = parseMMDDToFullDate(date);
@@ -736,14 +741,9 @@ async function handleBlockCommand(message) {
     return;
   }
 
-  // 討論串還沒建立也沒關係（例如提早鎖定下週五）：鎖定資料本身跟討論串是否存在無關，
-  // 等討論串之後自動建立時，這個時段自然就會是不開放狀態，refreshSummaryMessage 內部
-  // 找不到討論串時本來就會安全地不做任何事
+  const blockId = insertBlockedSlot({ guildId, bookingDate, startTime: start, endTime: end, reason });
 
-  const blockId = insertBlockedSlot({ bookingDate, startTime: start, endTime: end, reason });
-
-  // 找出這個時段內已經存在的預約，刪除並記錄下來準備通知
-  const affected = getBookingsByDate(bookingDate).filter((b) => {
+  const affected = getBookingsByDate(guildId, bookingDate).filter((b) => {
     const mins = timeToMinutes(b.scheduled_time);
     return mins !== null && isWithinBlockedSlot(mins, { start_time: start, end_time: end });
   });
@@ -752,7 +752,7 @@ async function handleBlockCommand(message) {
     cancelBookingById(b.id);
   }
 
-  await refreshSummaryMessage(bookingDate);
+  await refreshSummaryMessage(guildId, bookingDate);
 
   const reasonText = reason ? `（原因：${reason}）` : "";
   if (affected.length) {
@@ -761,18 +761,17 @@ async function handleBlockCommand(message) {
       `@everyone 📢 公告：${date} ${start} ~ ${end} 這個時段目前不開放預約${reasonText}。\n\n` +
       `以下預約因為時段衝突已被系統取消，請重新選擇其他時間登記，造成不便請見諒 🙏\n${tags}`;
     const lockImage = pickLockAnnouncementImage(reason);
-    await sendAnnouncement(announcement, lockImage ? [lockImage] : []);
+    await sendAnnouncement(guildSettings, announcement, lockImage ? [lockImage] : []);
   }
-  // 沒有任何預約受影響時不主動公告，等這一天的討論串建立時再一併公告（見 announceBlockedSlotsForNewThread）
 
   await message
     .reply(`已鎖定 ${date} ${start}~${end}（編號 #${blockId}），取消了 ${affected.length} 筆衝突的預約。`)
     .catch(() => {});
-  await logToAdmin(`🚫 已鎖定 ${date} ${start}~${end}${reasonText}，取消 ${affected.length} 筆預約`);
+  await logToAdmin(guildSettings, `🚫 已鎖定 ${date} ${start}~${end}${reasonText}，取消 ${affected.length} 筆預約`);
 }
 
-// 「解除鎖定」指令：依編號刪除鎖定設定，並在討論串公告恢復開放
-async function handleUnblockCommand(message) {
+// 「解除鎖定」指令
+async function handleUnblockCommand(message, guildSettings) {
   const { id } = parseUnblockCommand(message.content);
   if (!id) {
     await message.reply("請附上要解除的編號，例如：\n```\n解除鎖定：\n編號：7\n```").catch(() => {});
@@ -780,7 +779,7 @@ async function handleUnblockCommand(message) {
   }
 
   const slot = getBlockedSlotById(id);
-  if (!slot) {
+  if (!slot || slot.guild_id !== guildSettings.guild_id) {
     await message.reply(`找不到編號 #${id} 的鎖定設定。`).catch(() => {});
     return;
   }
@@ -790,16 +789,17 @@ async function handleUnblockCommand(message) {
     .reply(`已解除鎖定 #${id}（${slot.booking_date} ${slot.start_time}~${slot.end_time}）。`)
     .catch(() => {});
 
-  const summaryRow = getSummaryMessage(slot.booking_date);
+  const summaryRow = getSummaryMessage(guildSettings.guild_id, slot.booking_date);
   if (summaryRow) {
     const unlockImage = buildAnnouncementAttachment("unlock.png");
     await sendAnnouncement(
+      guildSettings,
       `@everyone 📢 公告：${slot.start_time} ~ ${slot.end_time} 這個時段恢復開放預約囉！`,
       unlockImage ? [unlockImage] : []
     );
   }
 
-  await logToAdmin(`✅ 已解除鎖定 #${id}（${slot.booking_date} ${slot.start_time}~${slot.end_time}）`);
+  await logToAdmin(guildSettings, `✅ 已解除鎖定 #${id}（${slot.booking_date} ${slot.start_time}~${slot.end_time}）`);
 }
 
 async function safeReact(message, emoji) {
@@ -810,32 +810,29 @@ async function safeReact(message, emoji) {
   }
 }
 
-// 把訊息推播到管理頻道（純紀錄用，沒設定 ADMIN_CHANNEL_ID 就跳過）
-async function logToAdmin(text) {
-  if (!process.env.ADMIN_CHANNEL_ID) return;
+// 把訊息推播到某個語音群的機器人紀錄頻道（純紀錄用，沒設定的話跳過）
+async function logToAdmin(guildSettings, text) {
+  if (!guildSettings?.admin_channel_id) return;
   try {
-    const adminChannel = await client.channels.fetch(process.env.ADMIN_CHANNEL_ID);
+    const adminChannel = await client.channels.fetch(guildSettings.admin_channel_id);
     await adminChannel.send(text);
   } catch (err) {
     console.warn("管理頻道紀錄推播失敗：", err.message);
   }
 }
 
-// 重新渲染 & 編輯（並確保置頂）指定日期的班表 embed
-async function refreshSummaryMessage(bookingDate) {
-  const summaryRow = getSummaryMessage(bookingDate);
+// 重新渲染 & 編輯（並確保置頂）指定語音群、指定日期的班表 embed
+async function refreshSummaryMessage(guildId, bookingDate) {
+  const summaryRow = getSummaryMessage(guildId, bookingDate);
   if (!summaryRow) return;
 
-  const bookings = getConfirmedBookingsByDate(bookingDate);
+  const bookings = getConfirmedBookingsByDate(guildId, bookingDate);
   const pages = chunkBookingsForSummary(bookings);
   const totalPages = pages.length;
-  // 顯示用的頁數：至少會撐滿保留頁數（就算目前資料不夠，保留頁還是要更新成「本頁無資料」，
-  // 不會因為筆數變少就被刪掉、導致訊息位置跑掉）
   const displayPages = Math.max(totalPages, RESERVED_SUMMARY_PAGES);
 
   const thread = await client.channels.fetch(summaryRow.channel_id);
 
-  // 第 0 頁：沿用 daily_summary 記錄的主訊息
   const embed0 = buildSummaryEmbed(bookingDate, pages[0] || [], 0, displayPages);
   const msg0 = await thread.messages.fetch(summaryRow.message_id);
   await msg0.edit({ embeds: [embed0] });
@@ -843,8 +840,7 @@ async function refreshSummaryMessage(bookingDate) {
     await msg0.pin().catch((err) => console.warn("置頂失敗（可能缺少 Manage Messages 權限）：", err.message));
   }
 
-  // 第 1 頁以後：先更新/建立到 displayPages 為止（保留頁固定存在，超出保留頁數的部分才是動態新增）
-  const existingPages = getSummaryPages(bookingDate);
+  const existingPages = getSummaryPages(guildId, bookingDate);
 
   for (let i = 1; i < displayPages; i++) {
     const embed = buildSummaryEmbed(bookingDate, pages[i] || [], i, displayPages);
@@ -862,11 +858,9 @@ async function refreshSummaryMessage(bookingDate) {
 
     const newMsg = await thread.send({ embeds: [embed] });
     await newMsg.pin().catch((err) => console.warn("分頁訊息置頂失敗：", err.message));
-    setSummaryPage(bookingDate, i, newMsg.id);
+    setSummaryPage(guildId, bookingDate, i, newMsg.id);
   }
 
-  // 只清掉「超出保留頁數」的額外分頁（例如衝到第 4 頁又縮回第 2 頁時，把多的第 4 頁刪掉）；
-  // 保留頁範圍內的分頁固定存在，不會因為暫時沒資料就被刪除
   for (const p of existingPages) {
     if (p.page_index >= displayPages) {
       try {
@@ -875,46 +869,9 @@ async function refreshSummaryMessage(bookingDate) {
       } catch (err) {
         console.warn(`清除多餘分頁訊息失敗 (${bookingDate} 第 ${p.page_index + 1} 頁)：`, err.message);
       }
-      deleteSummaryPage(bookingDate, p.page_index);
+      deleteSummaryPage(guildId, bookingDate, p.page_index);
     }
   }
 }
-
-// 輕量靜態檔案伺服器：讓 reports/report.html 可以直接用瀏覽器連線查看，不用每次下載
-// 只服務 reports/ 資料夾底下的檔案，不會暴露專案其他部分
-function startReportsServer() {
-  const port = Number(process.env.REPORTS_SERVER_PORT) || 8080;
-  const reportsDir = path.join(process.cwd(), "reports");
-
-  const mimeTypes = { ".html": "text/html; charset=utf-8", ".json": "application/json; charset=utf-8" };
-
-  http
-    .createServer((req, res) => {
-      const urlPath = req.url === "/" ? "/report.html" : req.url;
-      const filePath = path.join(reportsDir, path.normalize(urlPath).replace(/^(\.\.[/\\])+/, ""));
-
-      if (!filePath.startsWith(reportsDir)) {
-        res.writeHead(403);
-        res.end("Forbidden");
-        return;
-      }
-
-      fs.readFile(filePath, (err, data) => {
-        if (err) {
-          res.writeHead(404);
-          res.end("Not found");
-          return;
-        }
-        const ext = path.extname(filePath);
-        res.writeHead(200, { "Content-Type": mimeTypes[ext] || "application/octet-stream" });
-        res.end(data);
-      });
-    })
-    .listen(port, () => {
-      console.log(`週報告網頁伺服器已啟動：http://<VM對外IP>:${port}/report.html`);
-    });
-}
-
-startReportsServer();
 
 client.login(process.env.DISCORD_TOKEN);
