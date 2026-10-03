@@ -62,11 +62,11 @@ export function addDays(dateStr, days) {
   return `${yy}-${mm}-${dd}`;
 }
 
-// 遊戲週定義：週四 ~ 下週三（配合遊戲更新時間），回傳 { start, end }（皆為 YYYY-MM-DD）
+// 遊戲週定義：週二 ~ 下週一，回傳 { start, end }（皆為 YYYY-MM-DD）
 export function getGameWeekRange(referenceDate) {
-  const idx = getWeekdayIndex(referenceDate); // 0=日...6=六，四=4
-  const diffFromThursday = (idx - 4 + 7) % 7;
-  const start = addDays(referenceDate, -diffFromThursday);
+  const idx = getWeekdayIndex(referenceDate); // 0=日...6=六，二=2
+  const diffFromTuesday = (idx - 2 + 7) % 7;
+  const start = addDays(referenceDate, -diffFromTuesday);
   const end = addDays(start, 6);
   return { start, end };
 }

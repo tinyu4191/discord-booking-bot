@@ -527,7 +527,7 @@ async function handleDeleteTestThreadCommand(message, guildSettings) {
   await message.reply(`已刪除 ${date} 的測試討論串與相關資料。`).catch(() => {});
 }
 
-// 「查詢本週鎖定」（也接受舊名「查詢鎖定」）：本週定義為週四~下週三
+// 「查詢本週鎖定」（也接受舊名「查詢鎖定」）：本週定義為週二~下週一
 async function handleWeekListCommand(message, guildSettings) {
   const guildId = guildSettings.guild_id;
   const today = getBookingDateToday();
@@ -605,6 +605,9 @@ async function handleRecurringBlockCommand(message, guildSettings) {
 
   const today = getBookingDateToday();
   const affectedGroups = [];
+  // 沒取消到任何預約，但那天的討論串已經存在的日期：不會再有「討論串建立時」的觸發機會，要在這裡一併公告
+  const alreadyExistingDates = [];
+
   for (let i = 0; i <= 6; i++) {
     const date = addDays(today, i);
     if (getWeekdayIndex(date) !== weekday) continue;
@@ -626,6 +629,8 @@ async function handleRecurringBlockCommand(message, guildSettings) {
     if (affected.length) {
       await refreshSummaryMessage(guildId, date);
       affectedGroups.push({ date, bookings: affected });
+    } else if (getSummaryMessage(guildId, date)) {
+      alreadyExistingDates.push(date);
     }
   }
 
@@ -633,16 +638,18 @@ async function handleRecurringBlockCommand(message, guildSettings) {
   const reasonText = reason ? `（原因：${reason}）` : "";
   const totalAffected = affectedGroups.reduce((sum, g) => sum + g.bookings.length, 0);
 
-  if (totalAffected) {
-    const lines = affectedGroups.flatMap((g) =>
-      g.bookings.map((b) => `<@${b.booker_id}>（${formatDateLabel(g.date)} ${b.scheduled_time} / ${b.location}）`)
-    );
-    const announcement =
-      `@everyone 📢 公告：每週${weekdayLabel} ${start} ~ ${end} 這個時段固定不開放預約${reasonText}。\n\n` +
-      `以下預約因為時段衝突已被系統取消，請重新選擇其他時間登記，造成不便請見諒 🙏\n${lines.join("\n")}`;
+  if (totalAffected > 0 || alreadyExistingDates.length > 0) {
+    let announcement = `@everyone 📢 公告：每週${weekdayLabel} ${start} ~ ${end} 這個時段固定不開放預約${reasonText}。`;
+    if (totalAffected > 0) {
+      const lines = affectedGroups.flatMap((g) =>
+        g.bookings.map((b) => `<@${b.booker_id}>（${formatDateLabel(g.date)} ${b.scheduled_time} / ${b.location}）`)
+      );
+      announcement += `\n\n以下預約因為時段衝突已被系統取消，請重新選擇其他時間登記，造成不便請見諒 🙏\n${lines.join("\n")}`;
+    }
     const lockImage = pickLockAnnouncementImage(reason);
     await sendAnnouncement(guildSettings, announcement, lockImage ? [lockImage] : []);
   }
+  // 討論串還沒建立的日期，交給 announceBlockedSlotsForNewThread 在討論串建立當下一併公告
 
   await message
     .reply(`已設定每週${weekdayLabel} ${start}~${end} 固定鎖定（編號 #${templateId}），取消了 ${totalAffected} 筆衝突的預約。`)
@@ -703,7 +710,7 @@ async function handleHelpCommand(message) {
     "```\n週期鎖定：\n星期：日一二三四五六其中一字\n開始：HH:MM\n結束：HH:MM\n原因：(選填)\n```",
     "**解除週期鎖定** — 永久移除某條週期規則（連同已經產生、還沒發生的鎖定一起清除）",
     "```\n解除週期鎖定：\n編號：X\n```",
-    "**查詢本週鎖定**（也可打「查詢鎖定」）— 列出本週（週四~下週三）所有鎖定，含來源標註",
+    "**查詢本週鎖定**（也可打「查詢鎖定」）— 列出本週（週二~下週一）所有鎖定，含來源標註",
     "**查詢週期鎖定** — 列出所有週期規則跟編號",
     "**建立測試討論串** — 指定任意日期（不受未來7天限制）建立獨立測試用討論串",
     "```\n建立測試討論串：\n日期：YYYY-MM-DD\n```",
@@ -762,7 +769,14 @@ async function handleBlockCommand(message, guildSettings) {
       `以下預約因為時段衝突已被系統取消，請重新選擇其他時間登記，造成不便請見諒 🙏\n${tags}`;
     const lockImage = pickLockAnnouncementImage(reason);
     await sendAnnouncement(guildSettings, announcement, lockImage ? [lockImage] : []);
+  } else if (getSummaryMessage(guildId, bookingDate)) {
+    // 沒有取消到任何預約，但這天的討論串已經存在了（不是新討論串），
+    // 不會再有「討論串建立時」這個觸發公告的機會，所以要在這裡立刻補發
+    const announcement = `@everyone 📢 公告：${date} ${start} ~ ${end} 這個時段目前不開放預約${reasonText}。`;
+    const lockImage = pickLockAnnouncementImage(reason);
+    await sendAnnouncement(guildSettings, announcement, lockImage ? [lockImage] : []);
   }
+  // 討論串還沒建立的情況，交給 announceBlockedSlotsForNewThread 在討論串建立當下一併公告
 
   await message
     .reply(`已鎖定 ${date} ${start}~${end}（編號 #${blockId}），取消了 ${affected.length} 筆衝突的預約。`)
