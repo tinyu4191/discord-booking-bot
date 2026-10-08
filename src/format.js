@@ -78,6 +78,20 @@ export function timeToMinutes(timeStr) {
   return Number(match[1]) * 60 + Number(match[2]);
 }
 
+// 把分鐘數（0~1439）轉回 "HH:MM"
+export function minutesToTime(minutes) {
+  const h = String(Math.floor(minutes / 60)).padStart(2, "0");
+  const m = String(minutes % 60).padStart(2, "0");
+  return `${h}:${m}`;
+}
+
+// 兩個 YYYY-MM-DD 之間相差幾天（toDate - fromDate），toDate 比較晚就是正數
+export function diffDays(fromDate, toDate) {
+  const [y1, m1, d1] = fromDate.split("-").map(Number);
+  const [y2, m2, d2] = toDate.split("-").map(Number);
+  return Math.round((Date.UTC(y2, m2 - 1, d2) - Date.UTC(y1, m1 - 1, d1)) / 86400000);
+}
+
 // 判斷某個時間（分鐘數）是否落在鎖定時段（含頭尾）之內
 export function isWithinBlockedSlot(minutes, slot) {
   const startMin = timeToMinutes(slot.start_time);
@@ -90,7 +104,7 @@ export function isWithinBlockedSlot(minutes, slot) {
 // 精簡成單行格式，不用粗體語法跟裝飾分隔線（純裝飾不含資訊量，但佔字元數），
 // 這樣同樣的字元預算能塞進更多筆，降低分頁門檻後也不容易一般日子就爆頁
 // 依地點名稱挑選對應的 emoji，沒對應到關鍵字的地點用預設的 ⚔️
-function getLocationEmoji(location) {
+export function getLocationEmoji(location) {
   const name = location || "";
   if (name.includes("蝴蝶")) return "🦋";
   if (name.includes("龍")) return "🐉";

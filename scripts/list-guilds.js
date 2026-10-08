@@ -41,6 +41,7 @@ async function main() {
       ["機器人紀錄 (admin_channel_id)", settings.admin_channel_id],
       ["管理頻道 (management_channel_id)", settings.management_channel_id],
       ["公告頻道 (announcement_channel_id)", settings.announcement_channel_id],
+      ["提醒頻道 (reminder_channel_id)", settings.reminder_channel_id],
     ];
 
     for (const [label, channelId] of channelLabels) {

@@ -4,7 +4,9 @@
 //   要把某個選填欄位清掉：該參數帶 none，例如 --announcement none
 //
 // 用法：
-//   node scripts/add-guild.js <guildId> --booking <頻道ID> [--admin <頻道ID>] [--management <頻道ID>] [--announcement <頻道ID>]
+//   node scripts/add-guild.js <guildId> --booking <頻道ID> [--admin <頻道ID>] [--management <頻道ID>] [--announcement <頻道ID>] [--reminder <頻道ID>]
+//
+// --reminder 是管理者專用的「預約提醒」頻道：預約開始前 5 分鐘會在這裡發提醒＋續約按鈕，沒設定就不啟用提醒
 //
 // guildId 怎麼拿：在 Discord 對該語音群的伺服器圖示按右鍵「複製伺服器 ID」（要先開開發者模式）
 // 頻道 ID：對應頻道按右鍵「複製頻道 ID」
@@ -29,7 +31,7 @@ function parseFlags(args) {
 
 function printUsage() {
   console.log("用法：");
-  console.log("  node scripts/add-guild.js <guildId> --booking <頻道ID> [--admin <頻道ID>] [--management <頻道ID>] [--announcement <頻道ID>]");
+  console.log("  node scripts/add-guild.js <guildId> --booking <頻道ID> [--admin <頻道ID>] [--management <頻道ID>] [--announcement <頻道ID>] [--reminder <頻道ID>]");
   console.log("");
   console.log("編輯已登記的語音群時，只需要帶你想改的參數，沒帶的欄位會維持原值。");
   console.log("要清空某個選填欄位，該參數帶 none，例如：--announcement none");
@@ -63,6 +65,7 @@ const next = {
   adminChannelId: resolveValue(flags.admin, existing?.admin_channel_id),
   managementChannelId: resolveValue(flags.management, existing?.management_channel_id),
   announcementChannelId: resolveValue(flags.announcement, existing?.announcement_channel_id),
+  reminderChannelId: resolveValue(flags.reminder, existing?.reminder_channel_id),
 };
 
 upsertGuildSettings(guildId, next);

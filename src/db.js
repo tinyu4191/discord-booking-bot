@@ -11,9 +11,17 @@ db.exec(`
     admin_channel_id           TEXT,           -- 選填，機器人紀錄用
     management_channel_id      TEXT,           -- 管理員下鎖定指令的頻道
     announcement_channel_id    TEXT,           -- 選填，@everyone 公告頻道
+    reminder_channel_id        TEXT,           -- 選填，管理者專用的預約提醒頻道（沒設定就不啟用提醒）
     created_at                 TEXT NOT NULL DEFAULT (datetime('now'))
   )
 `);
+
+// 舊資料庫的 guild_settings 沒有 reminder_channel_id 欄位，啟動時自動補上（已經有就略過）
+function ensureColumn(table, column, ddl) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+  if (!cols.includes(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+}
+ensureColumn("guild_settings", "reminder_channel_id", "reminder_channel_id TEXT");
 
 // 預約主表：每一筆預約對應到討論串裡的一則留言（message_id），guild_id 區分是哪個語音群的資料
 db.exec(`
@@ -83,23 +91,56 @@ db.exec(`
   )
 `);
 
+// 預約提醒：預約開始前幾分鐘，在提醒頻道發一則帶「續約／不續約」按鈕的訊息。
+// 一筆提醒 = 某筆預約在某個日期＋時間的那一次提醒（預約被改時間後，會算成新的一筆提醒）
+db.exec(`
+  CREATE TABLE IF NOT EXISTS booking_reminders (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id      TEXT NOT NULL,
+    booking_id    INTEGER NOT NULL,
+    booking_date  TEXT NOT NULL,      -- 被提醒的那筆預約的日期（提醒當下的值）
+    booking_time  TEXT NOT NULL,      -- 被提醒的那筆預約的時間（提醒當下的值）
+    renew_date    TEXT,               -- 預檢算出的續約日期（跨午夜會是隔天）
+    renew_time    TEXT,               -- 預檢算出的續約時間（原時間 +50 分鐘）
+    can_renew     INTEGER NOT NULL DEFAULT 1,  -- 預檢結果：1=沒衝突有按鈕、0=有衝突不給按鈕
+    base_content  TEXT NOT NULL,      -- 提醒訊息的固定部分（標題＋預約內容），之後改訊息時重用
+    precheck_note TEXT,               -- 預檢發現的衝突原因
+    result_note   TEXT,               -- 續約失敗原因／過期原因（預約被改、取消等）
+    channel_id    TEXT,               -- 提醒訊息所在頻道
+    message_id    TEXT,               -- 提醒訊息 id
+    status        TEXT NOT NULL DEFAULT 'pending',
+      -- pending=待處理(有按鈕) / no_renew=預檢有衝突(沒按鈕) / processing=處理中
+      -- renewed=已續約 / declined=不續約 / failed=續約失敗 / expired=過期
+    handled_by    TEXT,               -- 按按鈕的人
+    new_booking_id INTEGER,           -- 續約新增的預約 id
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    handled_at    TEXT,
+    UNIQUE (booking_id, booking_date, booking_time)
+  )
+`);
+
 // ---- 語音群設定 ----
 
-export function upsertGuildSettings(guildId, { bookingParentChannelId, adminChannelId, managementChannelId, announcementChannelId }) {
+export function upsertGuildSettings(
+  guildId,
+  { bookingParentChannelId, adminChannelId, managementChannelId, announcementChannelId, reminderChannelId }
+) {
   db.prepare(`
-    INSERT INTO guild_settings (guild_id, booking_parent_channel_id, admin_channel_id, management_channel_id, announcement_channel_id)
-    VALUES (@guildId, @bookingParentChannelId, @adminChannelId, @managementChannelId, @announcementChannelId)
+    INSERT INTO guild_settings (guild_id, booking_parent_channel_id, admin_channel_id, management_channel_id, announcement_channel_id, reminder_channel_id)
+    VALUES (@guildId, @bookingParentChannelId, @adminChannelId, @managementChannelId, @announcementChannelId, @reminderChannelId)
     ON CONFLICT(guild_id) DO UPDATE SET
       booking_parent_channel_id = excluded.booking_parent_channel_id,
       admin_channel_id = excluded.admin_channel_id,
       management_channel_id = excluded.management_channel_id,
-      announcement_channel_id = excluded.announcement_channel_id
+      announcement_channel_id = excluded.announcement_channel_id,
+      reminder_channel_id = excluded.reminder_channel_id
   `).run({
     guildId,
     bookingParentChannelId,
     adminChannelId: adminChannelId || null,
     managementChannelId: managementChannelId || null,
     announcementChannelId: announcementChannelId || null,
+    reminderChannelId: reminderChannelId || null,
   });
 }
 
@@ -294,6 +335,87 @@ export function getBlockedSlotById(id) {
 
 export function deleteBlockedSlot(id) {
   db.prepare(`DELETE FROM blocked_slots WHERE id = ?`).run(id);
+}
+
+// ---- 預約提醒 ----
+
+// 新增一筆提醒。同一筆預約、同一個日期時間已經提醒過就回傳 null（不重複提醒）
+export function insertReminder({
+  guildId, bookingId, bookingDate, bookingTime, renewDate, renewTime, canRenew, baseContent, precheckNote,
+}) {
+  const result = db.prepare(`
+    INSERT OR IGNORE INTO booking_reminders
+      (guild_id, booking_id, booking_date, booking_time, renew_date, renew_time, can_renew, base_content, precheck_note, status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    guildId, bookingId, bookingDate, bookingTime,
+    renewDate || null, renewTime || null,
+    canRenew ? 1 : 0, baseContent, precheckNote || null,
+    canRenew ? "pending" : "no_renew"
+  );
+  return result.changes ? Number(result.lastInsertRowid) : null;
+}
+
+export function getReminderById(id) {
+  return db.prepare(`SELECT * FROM booking_reminders WHERE id = ?`).get(id);
+}
+
+export function getReminderBySlot(bookingId, bookingDate, bookingTime) {
+  return db.prepare(`
+    SELECT * FROM booking_reminders WHERE booking_id = ? AND booking_date = ? AND booking_time = ?
+  `).get(bookingId, bookingDate, bookingTime);
+}
+
+export function setReminderMessage(id, channelId, messageId) {
+  db.prepare(`UPDATE booking_reminders SET channel_id = ?, message_id = ? WHERE id = ?`).run(channelId, messageId, id);
+}
+
+export function deleteReminder(id) {
+  db.prepare(`DELETE FROM booking_reminders WHERE id = ?`).run(id);
+}
+
+// 還沒處理、之後可能需要過期劃線的提醒（有按鈕的 pending + 預檢有衝突沒按鈕的 no_renew）
+export function getOpenReminders(guildId) {
+  return db.prepare(`
+    SELECT * FROM booking_reminders WHERE guild_id = ? AND status IN ('pending', 'no_renew') ORDER BY id
+  `).all(guildId);
+}
+
+// 搶占處理權：只有 pending 才能被搶到，一次只會有一個人成功（避免兩位管理員同時按）
+export function claimReminder(id) {
+  const r = db.prepare(`UPDATE booking_reminders SET status = 'processing' WHERE id = ? AND status = 'pending'`).run(id);
+  return r.changes === 1;
+}
+
+// 搶到處理權之後如果沒辦法完成（例如 Discord 互動逾時），把它放回待處理，讓管理者可以重按
+export function releaseReminder(id) {
+  db.prepare(`UPDATE booking_reminders SET status = 'pending' WHERE id = ? AND status = 'processing'`).run(id);
+}
+
+export function finishReminder(id, status, { handledBy, newBookingId, note } = {}) {
+  db.prepare(`
+    UPDATE booking_reminders
+    SET status = ?, handled_by = ?, new_booking_id = ?, result_note = ?, handled_at = datetime('now')
+    WHERE id = ?
+  `).run(status, handledBy || null, newBookingId || null, note || null, id);
+}
+
+// 把還沒處理的提醒標成過期；已經被處理過（或正在處理）的不會被動到，成功才回傳 true
+export function expireReminder(id, note) {
+  const r = db.prepare(`
+    UPDATE booking_reminders
+    SET status = 'expired', result_note = ?, handled_at = datetime('now')
+    WHERE id = ? AND status IN ('pending', 'no_renew')
+  `).run(note || null, id);
+  return r.changes === 1;
+}
+
+// 清掉太舊且已經結案的提醒紀錄，避免資料表一直長大
+export function purgeOldReminders(days) {
+  db.prepare(`
+    DELETE FROM booking_reminders
+    WHERE created_at < datetime('now', ?) AND status NOT IN ('pending', 'no_renew', 'processing')
+  `).run(`-${Number(days)} day`);
 }
 
 // ---- 週期鎖定樣板 ----

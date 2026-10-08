@@ -61,6 +61,8 @@ import {
   buildSummaryEmbed,
   chunkBookingsForSummary,
 } from "./format.js";
+import { checkBookingSlot } from "./booking-rules.js";
+import { setupReminders } from "./reminders.js";
 
 const client = new Client({
   intents: [
@@ -80,6 +82,9 @@ const RESERVED_SUMMARY_PAGES = 1;
 
 client.once(Events.ClientReady, async () => {
   console.log(`已登入：${client.user.tag}`);
+  // 預約提醒（每分鐘掃描 + 續約按鈕）。放在最前面，重啟後按鈕才會馬上有效；
+  // 只有設定了 reminder_channel_id 的語音群才會真的發提醒
+  setupReminders({ client, refreshSummaryMessage, logToAdmin });
   await ensureUpcomingThreadsForAllGuilds();
   await lockPastThreadsForAllGuilds();
   // 每天固定時間：補開新的一天 + 鎖定已過期的討論串（所有已登記的語音群都會跑一次）
@@ -370,9 +375,13 @@ async function handleBookingMessage(message, { isEdit }) {
   const bookingDate = summaryRow.booking_date;
   const existingBooking = getBookingByMessageId(message.id);
 
-  // 鎖定時段檢查：週期鎖定在討論串建立時就已經自動產生對應的單次鎖定紀錄，這裡只需要查單次鎖定表
-  const blockedSlot = getBlockedSlotsByDate(guildId, bookingDate).find((slot) => isWithinBlockedSlot(newMinutes, slot));
-  if (blockedSlot) {
+  // 鎖定時段 + 前後 5 分鐘衝突檢查（跟「預約續約」共用同一份規則，見 booking-rules.js）。
+  // 週期鎖定在討論串建立時就已經自動產生對應的單次鎖定紀錄，所以只需要查單次鎖定表。
+  // 排除自己（編輯情境）
+  const slotIssue = checkBookingSlot(guildId, bookingDate, newMinutes, existingBooking?.id);
+
+  if (slotIssue?.type === "blocked") {
+    const blockedSlot = slotIssue.slot;
     await safeReact(message, "🚫");
     await message
       .reply(
@@ -382,13 +391,8 @@ async function handleBookingMessage(message, { isEdit }) {
     return;
   }
 
-  const conflict = getBookingsByDate(guildId, bookingDate).find((b) => {
-    if (existingBooking && b.id === existingBooking.id) return false; // 排除自己（編輯情境）
-    const mins = timeToMinutes(b.scheduled_time);
-    return mins !== null && Math.abs(mins - newMinutes) < 5;
-  });
-
-  if (conflict) {
+  if (slotIssue?.type === "conflict") {
+    const conflict = slotIssue.booking;
     await safeReact(message, "❌");
     await message
       .reply(
