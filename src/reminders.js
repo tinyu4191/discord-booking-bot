@@ -9,11 +9,12 @@
 //   3. 按「續約」：再檢查一次（提醒發出到按下之間可能有人登記），沒衝突才複製預約；有衝突就回報原因、不新增
 //      按「不續約」：移除按鈕、標記已處理
 //   4. 超過原預約的開始時間，或預約被改時間／取消／刪除：移除按鈕、整則內容劃刪除線
+//      已處理過的（已續約／不續約）也一樣，過了開始時間就整則劃線
 //
 // 只有設定了 reminder_channel_id 的語音群會啟用，沒設定的語音群完全不受影響。
 
 import cron from "node-cron";
-import { ActionRowBuilder, ButtonBuilder, ButtonStyle, Events, MessageFlags } from "discord.js";
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, Events, MessageFlags } from "discord.js";
 import {
   insertBooking,
   getBookingById,
@@ -30,6 +31,8 @@ import {
   releaseReminder,
   finishReminder,
   expireReminder,
+  getHandledUnfinalizedReminders,
+  markReminderFinalized,
   purgeOldReminders,
 } from "./db.js";
 import { checkBookingSlot } from "./booking-rules.js";
@@ -153,11 +156,18 @@ export function renderReminderContent(r) {
     case "processing":
       return `${r.base_content}\n⏳ 處理中⋯`;
     case "renewed":
-      return `${r.base_content}\n✅ 已續約 → 新預約 ${renewLabel(r)}（${who}）`;
     case "declined":
-      return `${r.base_content}\n❌ 不續約（${who}）`;
-    case "failed":
-      return `${r.base_content}\n⚠️ 續約失敗：${r.result_note}（${who}）`;
+    case "failed": {
+      const line =
+        r.status === "renewed"
+          ? `✅ 已續約 → 新預約 ${renewLabel(r)}（${who}）`
+          : r.status === "declined"
+            ? `❌ 不續約（${who}）`
+            : `⚠️ 續約失敗：${r.result_note}（${who}）`;
+      const text = `${r.base_content}\n${line}`;
+      // 預約開始時間過了之後整則劃線，跟「沒人處理就過期」的樣子一致，一眼分得出哪些已經過去
+      return r.finalized ? strike(text) : text;
+    }
     case "expired": {
       const struck = strike(`${r.base_content}\n${openLine(r)}`);
       return r.result_note ? `${struck}\n-# ${r.result_note}` : struck;
@@ -165,6 +175,32 @@ export function renderReminderContent(r) {
     default:
       return r.base_content;
   }
+}
+
+// 每則提醒用一張 embed 卡片，左邊的色條依狀態變色，則與則之間自然分開
+const STATUS_COLORS = {
+  pending: 0x3498db, // 藍：等待處理
+  no_renew: 0xe67e22, // 橘：不能續約
+  processing: 0x95a5a6,
+  renewed: 0x2ecc71, // 綠：已續約
+  declined: 0x7f8c8d, // 灰：不續約
+  failed: 0xe74c3c, // 紅：續約失敗
+  expired: 0x4f545c, // 深灰：過期
+};
+
+function reminderColor(r) {
+  if (r.status === "pending" && !r.can_renew) return STATUS_COLORS.no_renew;
+  if (r.finalized) return STATUS_COLORS.expired; // 過了開始時間的，一律變暗
+  return STATUS_COLORS[r.status] ?? STATUS_COLORS.expired;
+}
+
+export function buildReminderMessage(r, { buttons = false } = {}) {
+  return {
+    content: "",
+    embeds: [new EmbedBuilder().setDescription(renderReminderContent(r)).setColor(reminderColor(r))],
+    components: buttons ? buildButtons(r.id) : [],
+    allowedMentions: NO_PING,
+  };
 }
 
 function buildButtons(reminderId) {
@@ -176,10 +212,10 @@ function buildButtons(reminderId) {
   ];
 }
 
-async function editReminderMessage(channelId, messageId, content) {
+async function editReminderMessage(channelId, messageId, reminder) {
   try {
     const channel = await deps.client.channels.fetch(channelId);
-    await channel.messages.edit(messageId, { content, components: [], allowedMentions: NO_PING });
+    await channel.messages.edit(messageId, buildReminderMessage(reminder));
   } catch (err) {
     console.warn(`更新提醒訊息失敗（訊息可能已被刪除）：${err.message}`);
   }
@@ -216,7 +252,15 @@ async function sweepReminders(settings) {
     const stale = getStaleReason(r);
     if (!stale) continue;
     if (!expireReminder(r.id, stale.note)) continue; // 剛好被按下去處理了，就不要動它
-    await editReminderMessage(r.channel_id, r.message_id, renderReminderContent(getReminderById(r.id)));
+    await editReminderMessage(r.channel_id, r.message_id, getReminderById(r.id));
+  }
+
+  // 已經處理過的提醒（續約／不續約／失敗），預約開始時間過了就整則劃線
+  for (const r of getHandledUnfinalizedReminders(settings.guild_id)) {
+    const until = minutesUntilStart(r.booking_date, r.booking_time);
+    if (until === null || until >= 0) continue;
+    markReminderFinalized(r.id);
+    await editReminderMessage(r.channel_id, r.message_id, getReminderById(r.id));
   }
 }
 
@@ -239,11 +283,7 @@ async function createReminder(settings, booking, bookingDate) {
   try {
     const r = getReminderById(id);
     const channel = await deps.client.channels.fetch(settings.reminder_channel_id);
-    const msg = await channel.send({
-      content: renderReminderContent(r),
-      components: r.can_renew ? buildButtons(id) : [],
-      allowedMentions: NO_PING,
-    });
+    const msg = await channel.send(buildReminderMessage(r, { buttons: !!r.can_renew }));
     setReminderMessage(id, channel.id, msg.id);
   } catch (err) {
     // 發送失敗就把紀錄刪掉，下一分鐘（還在提醒範圍內的話）會自動重試
@@ -294,11 +334,7 @@ async function runTick() {
 async function settleMessage(interaction, reminder, text) {
   try {
     await interaction.deferUpdate();
-    await interaction.editReply({
-      content: renderReminderContent(reminder),
-      components: [],
-      allowedMentions: NO_PING,
-    });
+    await interaction.editReply(buildReminderMessage(reminder));
     await interaction.followUp({ content: text, flags: MessageFlags.Ephemeral });
   } catch (err) {
     console.warn("整理提醒訊息失敗：", err.message);
@@ -378,22 +414,14 @@ export async function handleRenewButton(interaction) {
     } else {
       renewed = renewBooking(reminder, userId);
     }
-    await interaction.editReply({
-      content: renderReminderContent(getReminderById(reminder.id)),
-      components: [],
-      allowedMentions: NO_PING,
-    });
+    await interaction.editReply(buildReminderMessage(getReminderById(reminder.id)));
   } catch (err) {
     console.error("處理續約按鈕時發生錯誤：", err);
     if (getReminderById(reminder.id)?.status === "processing") {
       finishReminder(reminder.id, "failed", { handledBy: userId, note: "系統錯誤，請查看伺服器 log" });
     }
     try {
-      await interaction.editReply({
-        content: renderReminderContent(getReminderById(reminder.id)),
-        components: [],
-        allowedMentions: NO_PING,
-      });
+      await interaction.editReply(buildReminderMessage(getReminderById(reminder.id)));
     } catch {
       // 連改訊息都失敗就算了，狀態已經寫進資料庫
     }

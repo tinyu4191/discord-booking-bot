@@ -118,6 +118,8 @@ db.exec(`
     UNIQUE (booking_id, booking_date, booking_time)
   )
 `);
+// 已處理（續約／不續約／失敗）的提醒，過了預約開始時間後會整則劃線，劃過就標記 1，不重複處理
+ensureColumn("booking_reminders", "finalized", "finalized INTEGER NOT NULL DEFAULT 0");
 
 // ---- 語音群設定 ----
 
@@ -379,6 +381,19 @@ export function getOpenReminders(guildId) {
   return db.prepare(`
     SELECT * FROM booking_reminders WHERE guild_id = ? AND status IN ('pending', 'no_renew') ORDER BY id
   `).all(guildId);
+}
+
+// 已經處理過（續約／不續約／失敗）、但還沒在過了開始時間後劃線的提醒
+export function getHandledUnfinalizedReminders(guildId) {
+  return db.prepare(`
+    SELECT * FROM booking_reminders
+    WHERE guild_id = ? AND status IN ('renewed', 'declined', 'failed') AND finalized = 0 AND message_id IS NOT NULL
+    ORDER BY id
+  `).all(guildId);
+}
+
+export function markReminderFinalized(id) {
+  db.prepare(`UPDATE booking_reminders SET finalized = 1 WHERE id = ?`).run(id);
 }
 
 // 搶占處理權：只有 pending 才能被搶到，一次只會有一個人成功（避免兩位管理員同時按）
