@@ -64,6 +64,7 @@ import {
 import { checkBookingSlot } from "./booking-rules.js";
 import { buildSlotReply } from "./slot-reply.js";
 import { setupReminders } from "./reminders.js";
+import { setupPageUiDemo } from "./page-ui-demo.js";
 
 const client = new Client({
   intents: [
@@ -86,6 +87,8 @@ client.once(Events.ClientReady, async () => {
   // 預約提醒（每分鐘掃描 + 續約按鈕）。放在最前面，重啟後按鈕才會馬上有效；
   // 只有設定了 reminder_channel_id 的語音群才會真的發提醒
   setupReminders({ client, refreshSummaryMessage, logToAdmin });
+  // 班表翻頁 UI 試作（假資料）：只有 .env 設了 DEMO_GUILD_ID 才會啟用，只註冊到那個測試伺服器
+  setupPageUiDemo(client);
   await ensureUpcomingThreadsForAllGuilds();
   await lockPastThreadsForAllGuilds();
   // 每天固定時間：補開新的一天 + 鎖定已過期的討論串（所有已登記的語音群都會跑一次）
