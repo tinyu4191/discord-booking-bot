@@ -62,6 +62,7 @@ import {
   chunkBookingsForSummary,
 } from "./format.js";
 import { checkBookingSlot } from "./booking-rules.js";
+import { buildSlotReply } from "./slot-reply.js";
 import { setupReminders } from "./reminders.js";
 
 const client = new Client({
@@ -385,7 +386,12 @@ async function handleBookingMessage(message, { isEdit }) {
     await safeReact(message, "🚫");
     await message
       .reply(
-        `這個時段（${blockedSlot.start_time} ~ ${blockedSlot.end_time}）目前不開放預約${blockedSlot.reason ? `（原因：${blockedSlot.reason}）` : ""}，請選擇其他時間。`
+        buildSlotReply(
+          guildId,
+          summaryRow,
+          newMinutes,
+          `這個時段（${blockedSlot.start_time} ~ ${blockedSlot.end_time}）目前不開放預約${blockedSlot.reason ? `（原因：${blockedSlot.reason}）` : ""}，請選擇其他時間。`
+        )
       )
       .catch(() => {});
     return;
@@ -396,7 +402,12 @@ async function handleBookingMessage(message, { isEdit }) {
     await safeReact(message, "❌");
     await message
       .reply(
-        `這個時段衝突了：${conflict.location} 在 ${conflict.scheduled_time} 已經有人預約（前後 5 分鐘內不可重複），請改個時間再留言一次。`
+        buildSlotReply(
+          guildId,
+          summaryRow,
+          newMinutes,
+          `這個時段衝突了：${conflict.location} 在 ${conflict.scheduled_time} 已經有人預約（前後 5 分鐘內不可重複），請改個時間再留言一次。`
+        )
       )
       .catch(() => {});
     return;
