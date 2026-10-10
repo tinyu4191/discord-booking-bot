@@ -64,6 +64,12 @@ db.exec(`
   )
 `);
 
+// 班表改成「單一訊息 + 翻頁」之後，這則訊息目前停在第幾頁、最後一次有人操作是什麼時候，要記在資料庫
+// （重啟後才不會忘）。layout_version：0 = 還是舊版版面（可能還有多餘的分頁訊息），1 = 已換成新版面
+ensureColumn("daily_summary", "current_page", "current_page INTEGER NOT NULL DEFAULT 0");
+ensureColumn("daily_summary", "last_touch", "last_touch INTEGER NOT NULL DEFAULT 0"); // 毫秒時間戳，0 = 從來沒人操作過
+ensureColumn("daily_summary", "layout_version", "layout_version INTEGER NOT NULL DEFAULT 0");
+
 // 記錄「某語音群、某天某時段不開放預約」的設定
 db.exec(`
   CREATE TABLE IF NOT EXISTS blocked_slots (
@@ -258,6 +264,36 @@ export function getUnlockedPastSummaries(guildId, todayStr) {
 
 export function markSummaryLocked(guildId, bookingDate) {
   db.prepare(`UPDATE daily_summary SET locked = 1 WHERE guild_id = ? AND booking_date = ?`).run(guildId, bookingDate);
+}
+
+// 記錄班表目前停在第幾頁。touchMs 有給的話，同時更新「最後操作時間」（有人翻頁、衝突時機器人切頁、閒置復位都算）
+export function setSummaryView(guildId, bookingDate, page, touchMs = null) {
+  if (touchMs === null) {
+    db.prepare(`UPDATE daily_summary SET current_page = ? WHERE guild_id = ? AND booking_date = ?`).run(page, guildId, bookingDate);
+  } else {
+    db.prepare(`UPDATE daily_summary SET current_page = ?, last_touch = ? WHERE guild_id = ? AND booking_date = ?`)
+      .run(page, touchMs, guildId, bookingDate);
+  }
+}
+
+export function markSummaryLayout(guildId, bookingDate, version = 1) {
+  db.prepare(`UPDATE daily_summary SET layout_version = ? WHERE guild_id = ? AND booking_date = ?`).run(version, guildId, bookingDate);
+}
+
+// 還沒鎖定、日期是今天（含）以後的班表：閒置復位要掃描的對象
+export function getActiveSummaries(guildId, todayStr) {
+  return db.prepare(`
+    SELECT * FROM daily_summary WHERE guild_id = ? AND booking_date >= ? AND locked = 0 ORDER BY booking_date
+  `).all(guildId, todayStr);
+}
+
+// 還沒鎖定、日期是今天（含）以後、而且還是舊版版面的班表：啟動時要遷移成新版面
+export function getLegacyLayoutSummaries(guildId, todayStr) {
+  return db.prepare(`
+    SELECT * FROM daily_summary
+    WHERE guild_id = ? AND booking_date >= ? AND locked = 0 AND layout_version = 0
+    ORDER BY booking_date
+  `).all(guildId, todayStr);
 }
 
 // 完全刪掉某個語音群、某個日期的討論串紀錄，只給測試討論串清理用

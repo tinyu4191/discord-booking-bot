@@ -25,7 +25,12 @@ export function checkBookingSlot(guildId, bookingDate, minutes, excludeBookingId
 }
 
 // 建議空檔至少要比「現在」晚幾分鐘。預約提醒是開始前 1~5 分鐘才發，建議一個 1 分鐘後就開始的時間沒有意義
-export const SUGGEST_MIN_LEAD_MINUTES = 5;
+// 可以在 .env 設定 SUGGEST_MIN_LEAD_MINUTES 調整，沒設定就是 5
+function nonNegativeInt(value, fallback) {
+  const n = Number(value);
+  return Number.isInteger(n) && n >= 0 && value !== undefined && value !== "" ? n : fallback;
+}
+export const SUGGEST_MIN_LEAD_MINUTES = nonNegativeInt(process.env.SUGGEST_MIN_LEAD_MINUTES, 5);
 
 // 找出某個時間點「前後最近一個可以預約的時間」（純計算，不碰資料庫，方便測試）。
 // 判斷規則跟 checkBookingSlot 一致：不在鎖定時段（含頭尾）、跟其他預約相差至少 5 分鐘。

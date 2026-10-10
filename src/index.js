@@ -27,9 +27,7 @@ import {
   getSummaryMessage,
   getSummaryByThreadId,
   setSummaryMessage,
-  getSummaryPages,
-  setSummaryPage,
-  deleteSummaryPage,
+  markSummaryLayout,
   getUnlockedPastSummaries,
   markSummaryLocked,
   deleteSummaryMessage,
@@ -59,12 +57,17 @@ import {
   parseTestThreadCommand,
   parseMMDDToFullDate,
   buildSummaryEmbed,
-  chunkBookingsForSummary,
 } from "./format.js";
 import { checkBookingSlot } from "./booking-rules.js";
 import { buildSlotReply } from "./slot-reply.js";
 import { setupReminders } from "./reminders.js";
 import { setupPageUiDemo } from "./page-ui-demo.js";
+import {
+  setupSummaryBoard,
+  refreshSummaryMessage,
+  migrateLegacySummaries,
+  showSummaryPageForMinutes,
+} from "./summary-board.js";
 
 const client = new Client({
   intents: [
@@ -75,12 +78,11 @@ const client = new Client({
   partials: [Partials.Message, Partials.Channel],
 });
 
+// 班表翻頁（單一訊息 + 按鈕／下拉選單）、閒置自動復位。要在其他地方呼叫 refreshSummaryMessage 之前先註冊好 client
+setupSummaryBoard(client);
+
 // 0=週日 ... 6=週六 對應的星期圖片檔名，請把對應圖片放到 assets/weekday/ 底下
 const WEEKDAY_IMAGE_FILES = ["sun.png", "mon.png", "tue.png", "wed.png", "thu.png", "fri.png", "sat.png"];
-
-// 討論串建立時，預先保留幾頁班表訊息的位置。目前關閉（設成 1 = 不預留），
-// 分頁機制本身還是完整保留：真的筆數多到超過長度上限時，還是會自動動態新增分頁
-const RESERVED_SUMMARY_PAGES = 1;
 
 client.once(Events.ClientReady, async () => {
   console.log(`已登入：${client.user.tag}`);
@@ -91,6 +93,9 @@ client.once(Events.ClientReady, async () => {
   setupPageUiDemo(client);
   await ensureUpcomingThreadsForAllGuilds();
   await lockPastThreadsForAllGuilds();
+  // 還沒過期（今天含以後）的班表，從舊版的「多則分頁訊息」換成新版的「單一訊息 + 翻頁」，並刪掉多餘的分頁訊息。
+  // 只會處理還沒換過的（layout_version = 0），換完之後每次啟動都不會重複處理
+  await migrateLegacySummaries();
   // 每天固定時間：補開新的一天 + 鎖定已過期的討論串（所有已登記的語音群都會跑一次）
   cron.schedule(
     "5 0 * * *",
@@ -254,17 +259,11 @@ async function createDailyThread(parent, guildId, bookingDate) {
   }
   await guideMsg.pin().catch((err) => console.warn("置頂失敗（可能缺少 Manage Messages 權限）：", err.message));
 
-  const statsEmbed = buildSummaryEmbed(bookingDate, [], 0, RESERVED_SUMMARY_PAGES);
+  const statsEmbed = buildSummaryEmbed(bookingDate, [], 0, 1);
   const statsMsg = await thread.send({ embeds: [statsEmbed] });
   await statsMsg.pin().catch((err) => console.warn("置頂失敗（可能缺少 Manage Messages 權限）：", err.message));
   setSummaryMessage(guildId, bookingDate, thread.id, statsMsg.id);
-
-  for (let i = 1; i < RESERVED_SUMMARY_PAGES; i++) {
-    const pageEmbed = buildSummaryEmbed(bookingDate, [], i, RESERVED_SUMMARY_PAGES);
-    const pageMsg = await thread.send({ embeds: [pageEmbed] });
-    await pageMsg.pin().catch((err) => console.warn("置頂失敗（可能缺少 Manage Messages 權限）：", err.message));
-    setSummaryPage(guildId, bookingDate, i, pageMsg.id);
-  }
+  markSummaryLayout(guildId, bookingDate, 1); // 新建立的班表一開始就是新版面（單一訊息 + 翻頁）
 
   console.log(`[${guildId}] 已建立討論串：${bookingDate}`);
   const guildSettings = getGuildSettings(guildId);
@@ -348,6 +347,16 @@ client.on(Events.MessageDelete, async (message) => {
   }
 });
 
+// 預約被擋下來（衝突／鎖定）時：先把班表切到「想預約的時間所在的那一頁」，使用者點回覆裡的連結過去就是對的那一頁。
+// 切頁失敗（例如討論串已封存）不影響後面的衝突回覆
+async function switchBoardToMinutes(guildId, bookingDate, minutes) {
+  try {
+    await showSummaryPageForMinutes(guildId, bookingDate, minutes);
+  } catch (err) {
+    console.warn("切換班表頁面失敗：", err.message);
+  }
+}
+
 async function handleBookingMessage(message, { isEdit }) {
   const summaryRow = getSummaryByThreadId(message.channelId);
   if (!summaryRow) return; // 不是預約討論串，忽略
@@ -387,6 +396,7 @@ async function handleBookingMessage(message, { isEdit }) {
   if (slotIssue?.type === "blocked") {
     const blockedSlot = slotIssue.slot;
     await safeReact(message, "🚫");
+    await switchBoardToMinutes(guildId, bookingDate, newMinutes);
     await message
       .reply(
         buildSlotReply(
@@ -403,6 +413,7 @@ async function handleBookingMessage(message, { isEdit }) {
   if (slotIssue?.type === "conflict") {
     const conflict = slotIssue.booking;
     await safeReact(message, "❌");
+    await switchBoardToMinutes(guildId, bookingDate, newMinutes);
     await message
       .reply(
         buildSlotReply(
@@ -850,59 +861,6 @@ async function logToAdmin(guildSettings, text) {
     await adminChannel.send(text);
   } catch (err) {
     console.warn("管理頻道紀錄推播失敗：", err.message);
-  }
-}
-
-// 重新渲染 & 編輯（並確保置頂）指定語音群、指定日期的班表 embed
-async function refreshSummaryMessage(guildId, bookingDate) {
-  const summaryRow = getSummaryMessage(guildId, bookingDate);
-  if (!summaryRow) return;
-
-  const bookings = getConfirmedBookingsByDate(guildId, bookingDate);
-  const pages = chunkBookingsForSummary(bookings);
-  const totalPages = pages.length;
-  const displayPages = Math.max(totalPages, RESERVED_SUMMARY_PAGES);
-
-  const thread = await client.channels.fetch(summaryRow.channel_id);
-
-  const embed0 = buildSummaryEmbed(bookingDate, pages[0] || [], 0, displayPages);
-  const msg0 = await thread.messages.fetch(summaryRow.message_id);
-  await msg0.edit({ embeds: [embed0] });
-  if (!msg0.pinned) {
-    await msg0.pin().catch((err) => console.warn("置頂失敗（可能缺少 Manage Messages 權限）：", err.message));
-  }
-
-  const existingPages = getSummaryPages(guildId, bookingDate);
-
-  for (let i = 1; i < displayPages; i++) {
-    const embed = buildSummaryEmbed(bookingDate, pages[i] || [], i, displayPages);
-    const existing = existingPages.find((p) => p.page_index === i);
-
-    if (existing) {
-      try {
-        const msg = await thread.messages.fetch(existing.message_id);
-        await msg.edit({ embeds: [embed] });
-        continue;
-      } catch (err) {
-        console.warn(`分頁訊息抓不到，重新建立 (${bookingDate} 第 ${i + 1} 頁)：`, err.message);
-      }
-    }
-
-    const newMsg = await thread.send({ embeds: [embed] });
-    await newMsg.pin().catch((err) => console.warn("分頁訊息置頂失敗：", err.message));
-    setSummaryPage(guildId, bookingDate, i, newMsg.id);
-  }
-
-  for (const p of existingPages) {
-    if (p.page_index >= displayPages) {
-      try {
-        const oldMsg = await thread.messages.fetch(p.message_id);
-        await oldMsg.delete();
-      } catch (err) {
-        console.warn(`清除多餘分頁訊息失敗 (${bookingDate} 第 ${p.page_index + 1} 頁)：`, err.message);
-      }
-      deleteSummaryPage(guildId, bookingDate, p.page_index);
-    }
   }
 }
 

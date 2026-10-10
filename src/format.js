@@ -1,5 +1,5 @@
 // 產生固定格式的【預約統計】訊息（含格式教學 + 目前預約清單）
-import { EmbedBuilder } from "discord.js";
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, StringSelectMenuBuilder } from "discord.js";
 
 // 固定不變的格式教學（討論串建立時發一次，不會再被編輯）
 export function formatGuideText(bookingDate) {
@@ -302,4 +302,72 @@ export function parseBookingMessage(content) {
     channel: get("頻道"),
     proxyFor: get("代約"),
   };
+}
+// ---------------------------------------------------------------------------
+// 班表翻頁（單一訊息 + 按鈕 / 下拉選單）
+// ---------------------------------------------------------------------------
+
+export const SUMMARY_PAGER_PREFIX = "pgs";
+
+const pageFirstTime = (page) => page[0]?.scheduled_time ?? "--:--";
+const pageLastTime = (page) => page[page.length - 1]?.scheduled_time ?? "--:--";
+
+// 想預約的時間（分鐘數）落在哪一頁：第一個「最後一筆預約時間 >= 該時間」的頁；都沒有就是最後一頁
+export function pageForMinutes(pages, minutes) {
+  const idx = pages.findIndex((p) => p.length > 0 && timeToMinutes(pageLastTime(p)) >= minutes);
+  return idx < 0 ? pages.length - 1 : idx;
+}
+
+// 「最實用的那一頁」：今天 = 現在時間之後的那一頁；其他日期 = 第 1 頁
+export function defaultPageIndex(bookingDate, pages, nowMinutes = getCurrentTimeMinutes()) {
+  return bookingDate === getBookingDateToday() ? pageForMinutes(pages, nowMinutes) : 0;
+}
+
+export function clampPage(pages, n) {
+  return Math.min(Math.max(Number.isInteger(n) ? n : 0, 0), pages.length - 1);
+}
+
+// 班表訊息下面的翻頁元件：下拉選單（直接跳到某個時段）+ 三顆按鈕（上一頁 / 目前範圍 / 下一頁，標示時間範圍）。
+// 只有一頁時不需要翻頁，回傳空陣列
+export function buildSummaryComponents(pages, pageIndex) {
+  const total = pages.length;
+  if (total <= 1) return [];
+  const page = pages[pageIndex];
+  const hasPrev = pageIndex > 0;
+  const hasNext = pageIndex < total - 1;
+  const id = (target, tag) => `${SUMMARY_PAGER_PREFIX}|go|${target}|${tag}`;
+
+  const select = new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId(`${SUMMARY_PAGER_PREFIX}|sel`)
+      .setPlaceholder("跳到其他時段")
+      .addOptions(
+        pages.slice(0, 25).map((p, i) => ({
+          label: `${pageFirstTime(p)} – ${pageLastTime(p)}`,
+          description: `${p.length} 筆`,
+          value: String(i),
+          default: i === pageIndex,
+        }))
+      )
+  );
+
+  const buttons = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(id(Math.max(pageIndex - 1, 0), "p"))
+      .setLabel(hasPrev ? `◀ ${pageLastTime(pages[pageIndex - 1])} 前` : "◀ 最前面")
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(!hasPrev),
+    new ButtonBuilder()
+      .setCustomId(id(pageIndex, "c"))
+      .setLabel(`${pageFirstTime(page)}–${pageLastTime(page)}`)
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(true), // 只是顯示目前這頁的時間範圍
+    new ButtonBuilder()
+      .setCustomId(id(Math.min(pageIndex + 1, total - 1), "n"))
+      .setLabel(hasNext ? `${pageFirstTime(pages[pageIndex + 1])} 後 ▶` : "最後面 ▶")
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(!hasNext)
+  );
+
+  return [select, buttons];
 }
