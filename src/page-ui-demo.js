@@ -3,15 +3,19 @@
 // 啟用方式：在 .env 加上 DEMO_GUILD_ID=<測試伺服器ID>，重啟機器人。
 // 沒設定 DEMO_GUILD_ID 時，這個檔案什麼都不會做（正式群完全看不到 /page-ui-demo）。
 //
-// 試作重點：
-//   1. 公開訊息固定顯示一頁（今天 = 現在時間之後的那一頁），按鈕標示時間範圍
-//   2. 按任何翻頁按鈕，會用「只有按的人看得到」的私人訊息顯示那一頁，
-//      私人訊息裡的翻頁只影響自己，不會改到公開訊息，也不會影響別人
-//   3. 模擬「時段衝突」回覆：按「查看 13:30 附近的行程」，在原地彈出該時間所在那一頁的私人訊息
+// 設計重點（班表是所有人共用的一則公開訊息，沒有私人訊息）：
+//   1. 翻頁按鈕、下拉選單都直接改這則公開訊息，所有人看到的是同一頁（最後操作的人決定）
+//   2. 時段衝突時：機器人先把班表切到「衝突時段所在的那一頁」，再回覆衝突說明 + 連回班表的連結，
+//      使用者點過去看到的就已經是對的那一頁
+//   3. 閒置自動復位：班表超過一段時間沒人操作，自動回到「現在時間之後」那一頁（最實用的畫面）
 //
 // 指令：
-//   /page-ui-demo                      發一則公開班表（假資料）
-//   /page-ui-demo conflict_time:13:30  發一則模擬的衝突回覆（帶「查看附近行程」按鈕）
+//   /page-ui-demo                      在目前頻道發一則班表（假資料）
+//   /page-ui-demo conflict_time:13:30  模擬衝突：班表切到 13:30 所在頁，並回覆衝突說明 + 連結
+//
+// 可調整的環境變數：DEMO_IDLE_MINUTES（閒置幾分鐘後自動復位，預設 10，測試時可以設 1）
+//
+// 備註：試作的「目前頁 / 最後操作時間」存在記憶體裡，重啟會清掉（正式版會存資料庫）
 
 import {
   ActionRowBuilder,
@@ -27,6 +31,7 @@ import { buildSummaryEmbed, chunkBookingsForSummary, getBookingDateToday, getCur
 const PREFIX = "pgd";
 const NO_PING = { parse: [] };
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const IDLE_CHECK_INTERVAL_MS = 30 * 1000;
 
 // ---------------------------------------------------------------------------
 // 假資料：同一天永遠產生同樣的內容（用日期當亂數種子），所以重啟、重複按都一致
@@ -71,6 +76,8 @@ export function fakeBookings(date, userId = "0") {
   return list;
 }
 
+const getPages = (date) => chunkBookingsForSummary(fakeBookings(date));
+
 // ---------------------------------------------------------------------------
 // 分頁計算
 // ---------------------------------------------------------------------------
@@ -85,19 +92,36 @@ export function pageForMinutes(pages, minutes) {
 
 const clampPage = (pages, n) => Math.min(Math.max(Number.isInteger(n) ? n : 0, 0), pages.length - 1);
 
+// 「最實用的頁」：今天 = 現在時間之後的那一頁；其他日期 = 第 1 頁
+export function defaultPageIndex(date, pages, nowMinutes = getCurrentTimeMinutes()) {
+  return date === getBookingDateToday() ? pageForMinutes(pages, nowMinutes) : 0;
+}
+
 // ---------------------------------------------------------------------------
 // 畫面
 // ---------------------------------------------------------------------------
-
-// mode: "pub" = 公開訊息（按了會開私人訊息）；"prv" = 私人訊息（按了直接換頁，只影響自己）
-export function buildView(date, pages, pageIndex, mode, { note } = {}) {
+export function buildView(date, pages, pageIndex) {
   const total = pages.length;
   const page = pages[pageIndex];
   const embed = buildSummaryEmbed(date, page, pageIndex, total);
 
-  const id = (target, tag) => `${PREFIX}|go|${mode}|${target}|${date}|${tag}`;
+  const id = (target, tag) => `${PREFIX}|go|${target}|${date}|${tag}`;
   const hasPrev = pageIndex > 0;
   const hasNext = pageIndex < total - 1;
+
+  const select = new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId(`${PREFIX}|sel|${date}`)
+      .setPlaceholder("跳到其他時段")
+      .addOptions(
+        pages.slice(0, 25).map((p, i) => ({
+          label: `${firstTime(p)} – ${lastTime(p)}`,
+          description: `${p.length} 筆`,
+          value: String(i),
+          default: i === pageIndex,
+        }))
+      )
+  );
 
   const buttons = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
@@ -117,113 +141,130 @@ export function buildView(date, pages, pageIndex, mode, { note } = {}) {
       .setDisabled(!hasNext)
   );
 
-  const components = [buttons];
-  if (mode === "prv") {
-    // 私人訊息多一個下拉選單，直接跳到想看的時段
-    components.unshift(
-      new ActionRowBuilder().addComponents(
-        new StringSelectMenuBuilder()
-          .setCustomId(`${PREFIX}|sel|${date}`)
-          .setPlaceholder("跳到其他時段")
-          .addOptions(
-            pages.slice(0, 25).map((p, i) => ({
-              label: `${firstTime(p)} – ${lastTime(p)}`,
-              description: `${p.length} 筆`,
-              value: String(i),
-              default: i === pageIndex,
-            }))
-          )
-      )
-    );
+  return { content: "", embeds: [embed], components: [select, buttons], allowedMentions: NO_PING };
+}
+
+// ---------------------------------------------------------------------------
+// 班表狀態（記憶體）：messageId → { guildId, channelId, messageId, date, page, lastTouch }
+// ---------------------------------------------------------------------------
+const boards = new Map();
+
+function touchBoard(info, page, now = Date.now()) {
+  const existing = boards.get(info.messageId);
+  const board = existing ?? { ...info };
+  board.page = page;
+  board.lastTouch = now;
+  boards.set(board.messageId, board);
+  return board;
+}
+
+const findBoardByChannel = (channelId) => [...boards.values()].filter((b) => b.channelId === channelId).at(-1);
+
+export const __boards = boards; // 給測試用
+
+// ---------------------------------------------------------------------------
+// 閒置自動復位：超過 idleMs 沒人操作、而且目前停的頁不是「現在」那一頁 → 切回現在那一頁
+// 回傳這輪復位的班表數量
+// ---------------------------------------------------------------------------
+export async function resetIdleBoards(client, { now = Date.now(), idleMs = idleMinutes() * 60 * 1000, nowMinutes } = {}) {
+  let count = 0;
+  for (const board of [...boards.values()]) {
+    if (now - board.lastTouch < idleMs) continue;
+    const pages = getPages(board.date);
+    const target = defaultPageIndex(board.date, pages, nowMinutes);
+    if (target === board.page) continue;
+    try {
+      const channel = await client.channels.fetch(board.channelId);
+      await channel.messages.edit(board.messageId, buildView(board.date, pages, target));
+      board.page = target;
+      board.lastTouch = now;
+      count++;
+    } catch (err) {
+      console.warn(`班表復位失敗，移除追蹤（訊息可能已被刪除）：${err.message}`);
+      boards.delete(board.messageId);
+    }
   }
-
-  const view = { embeds: [embed], components, allowedMentions: NO_PING };
-  view.content = note || (mode === "prv" ? "🔎 只有你看得到這一頁，翻頁不會影響別人" : "");
-  return view;
+  return count;
 }
 
-function jumpRow(minutes, date) {
-  return new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`${PREFIX}|jump|${minutes}|${date}`)
-      .setLabel(`查看 ${minutesToTime(minutes)} 附近的行程`)
-      .setEmoji("📅")
-      .setStyle(ButtonStyle.Primary)
-  );
+function idleMinutes() {
+  const n = Number(process.env.DEMO_IDLE_MINUTES);
+  return Number.isFinite(n) && n > 0 ? n : 10;
 }
 
 // ---------------------------------------------------------------------------
-// 互動處理（匯出成純函式，方便用假 interaction 測試）
+// 互動處理（匯出成函式，方便用假 interaction 測試）
 // ---------------------------------------------------------------------------
+const tellPrivate = (i, content) => i.reply({ content, flags: MessageFlags.Ephemeral });
+
 export async function handleDemoInteraction(i) {
   const date = getBookingDateToday();
 
+  // ---- /page-ui-demo ----
   if (i.isChatInputCommand?.() && i.commandName === "page-ui-demo") {
     const conflictTime = i.options.getString("conflict_time");
-    if (conflictTime) {
-      const minutes = timeToMinutes(conflictTime);
-      if (minutes === null) {
-        return i.reply({ content: "時間格式請用 HH:MM，例如 13:30。", flags: MessageFlags.Ephemeral });
-      }
-      return i.reply({
-        content:
-          `這個時段衝突了：烏魯莊園2 在 ${minutesToTime(minutes)} 已經有人預約（前後 5 分鐘內不可重複），請改個時間再留言一次。\n` +
-          `💡 最近的空檔：${minutesToTime(Math.max(minutes - 5, 0))}、${minutesToTime(Math.min(minutes + 5, 1439))}（示範用，不是真的計算結果）`,
-        components: [jumpRow(minutes, date)],
-        allowedMentions: NO_PING,
-      });
+    const pages = getPages(date);
+
+    if (!conflictTime) {
+      const start = defaultPageIndex(date, pages);
+      await i.reply(buildView(date, pages, start));
+      const msg = await i.fetchReply();
+      touchBoard({ guildId: i.guildId, channelId: i.channelId, messageId: msg.id, date }, start);
+      return;
     }
 
-    const pages = chunkBookingsForSummary(fakeBookings(date, i.user.id));
-    // 今天 → 現在時間之後的那一頁；其他情況（這個試作只有今天）→ 第 1 頁
-    const start = pageForMinutes(pages, getCurrentTimeMinutes());
-    return i.reply(buildView(date, pages, start, "pub"));
+    const minutes = timeToMinutes(conflictTime);
+    if (minutes === null) return tellPrivate(i, "時間格式請用 HH:MM，例如 13:30。");
+
+    await i.deferReply();
+    const target = pageForMinutes(pages, minutes);
+    let board = findBoardByChannel(i.channelId);
+    try {
+      const channel = await i.client.channels.fetch(i.channelId);
+      if (board) {
+        // 已經有班表 → 先切到衝突時段所在的那一頁
+        await channel.messages.edit(board.messageId, buildView(date, pages, target));
+        board = touchBoard(board, target);
+      } else {
+        const sent = await channel.send(buildView(date, pages, target));
+        board = touchBoard({ guildId: i.guildId, channelId: i.channelId, messageId: sent.id, date }, target);
+      }
+    } catch (err) {
+      console.warn("切換班表頁面失敗：", err.message);
+    }
+
+    const url = board ? `https://discord.com/channels/${board.guildId}/${board.channelId}/${board.messageId}` : null;
+    const reply = {
+      content:
+        `這個時段衝突了：烏魯莊園2 在 ${minutesToTime(minutes)} 已經有人預約（前後 5 分鐘內不可重複），請改個時間再留言一次。\n` +
+        `💡 最近的空檔：${minutesToTime(Math.max(minutes - 5, 0))}、${minutesToTime(Math.min(minutes + 5, 1439))}（示範用，不是真的計算結果）`,
+      allowedMentions: NO_PING,
+    };
+    if (url) {
+      reply.components = [
+        new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setStyle(ButtonStyle.Link).setLabel(`查看 ${minutesToTime(minutes)} 附近的行程`).setURL(url)
+        ),
+      ];
+    }
+    return i.editReply(reply);
   }
 
+  // ---- 班表上的按鈕 / 下拉選單 ----
   const isComponent = (i.isButton?.() || i.isStringSelectMenu?.()) && i.customId?.startsWith(`${PREFIX}|`);
   if (!isComponent) return;
 
   const parts = i.customId.split("|");
   const kind = parts[1];
+  const boardDate = kind === "sel" ? parts[2] : parts[3];
+  if ((kind !== "go" && kind !== "sel") || !DATE_RE.test(boardDate)) return tellPrivate(i, "按鈕資料有誤。");
 
-  // 衝突回覆上的「查看附近行程」：原地彈出那個時間所在頁的私人訊息
-  if (kind === "jump") {
-    const minutes = Number(parts[2]);
-    const jumpDate = parts[3];
-    if (!Number.isInteger(minutes) || !DATE_RE.test(jumpDate)) return i.reply({ content: "按鈕資料有誤。", flags: MessageFlags.Ephemeral });
-    const pages = chunkBookingsForSummary(fakeBookings(jumpDate, i.user.id));
-    const idx = pageForMinutes(pages, minutes);
-    return i.reply({
-      ...buildView(jumpDate, pages, idx, "prv", { note: `📍 你想預約的 ${minutesToTime(minutes)} 在這一頁，翻頁只影響你自己` }),
-      flags: MessageFlags.Ephemeral,
-    });
-  }
+  const pages = getPages(boardDate);
+  const target = clampPage(pages, kind === "sel" ? Number(i.values[0]) : Number(parts[2]));
 
-  // 私人訊息的下拉選單：換頁
-  if (kind === "sel") {
-    const selDate = parts[2];
-    if (!DATE_RE.test(selDate)) return i.reply({ content: "按鈕資料有誤。", flags: MessageFlags.Ephemeral });
-    const pages = chunkBookingsForSummary(fakeBookings(selDate, i.user.id));
-    return i.update(buildView(selDate, pages, clampPage(pages, Number(i.values[0])), "prv"));
-  }
-
-  // 翻頁按鈕
-  if (kind === "go") {
-    const mode = parts[2];
-    const target = Number(parts[3]);
-    const goDate = parts[4];
-    if ((mode !== "pub" && mode !== "prv") || !DATE_RE.test(goDate)) {
-      return i.reply({ content: "按鈕資料有誤。", flags: MessageFlags.Ephemeral });
-    }
-    const pages = chunkBookingsForSummary(fakeBookings(goDate, i.user.id));
-    const idx = clampPage(pages, target);
-    if (mode === "pub") {
-      // 公開訊息：不改動它，另外開一則只有按的人看得到的私人訊息
-      return i.reply({ ...buildView(goDate, pages, idx, "prv"), flags: MessageFlags.Ephemeral });
-    }
-    // 私人訊息：直接換頁（只影響自己）
-    return i.update(buildView(goDate, pages, idx, "prv"));
-  }
+  // 重啟後記憶體是空的：從這則訊息本身重新建立追蹤
+  touchBoard({ guildId: i.guildId, channelId: i.channelId, messageId: i.message.id, date: boardDate }, target);
+  return i.update(buildView(boardDate, pages, target)); // 直接改這則公開訊息，所有人看到同一頁
 }
 
 // ---------------------------------------------------------------------------
@@ -241,11 +282,16 @@ export function setupPageUiDemo(client) {
   client.guilds
     .fetch(guildId)
     .then((guild) => guild.commands.create(command))
-    .then(() => console.log(`/page-ui-demo 已註冊到測試伺服器 ${guildId}`))
+    .then(() => console.log(`/page-ui-demo 已註冊到測試伺服器 ${guildId}（閒置 ${idleMinutes()} 分鐘自動復位）`))
     .catch((err) => console.warn("註冊 /page-ui-demo 失敗：", err.message));
 
   client.on(Events.InteractionCreate, (i) => {
     if (i.guildId !== guildId) return; // 只回應測試伺服器
     handleDemoInteraction(i).catch((err) => console.error("page-ui-demo 處理失敗：", err));
   });
+
+  const timer = setInterval(() => {
+    resetIdleBoards(client).catch((err) => console.error("班表閒置復位時發生錯誤：", err));
+  }, IDLE_CHECK_INTERVAL_MS);
+  timer.unref?.();
 }
