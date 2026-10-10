@@ -26,6 +26,7 @@ import {
   SlashCommandBuilder,
   StringSelectMenuBuilder,
 } from "discord.js";
+import { computeNearestFreeTimes, SUGGEST_MIN_LEAD_MINUTES } from "./booking-rules.js";
 import { buildSummaryEmbed, chunkBookingsForSummary, getBookingDateToday, getCurrentTimeMinutes, minutesToTime, timeToMinutes } from "./format.js";
 
 const PREFIX = "pgd";
@@ -234,10 +235,19 @@ export async function handleDemoInteraction(i) {
     }
 
     const url = board ? `https://discord.com/channels/${board.guildId}/${board.channelId}/${board.messageId}` : null;
+
+    // 用真的算法（假資料）找最近的空檔；今天的話，建議時間要比現在晚至少 SUGGEST_MIN_LEAD_MINUTES 分鐘
+    const notBefore = date === getBookingDateToday() ? getCurrentTimeMinutes() + SUGGEST_MIN_LEAD_MINUTES : 0;
+    const { before, after } = computeNearestFreeTimes(
+      { blockedSlots: [], takenMinutes: fakeBookings(date).map((b) => timeToMinutes(b.scheduled_time)) },
+      minutes,
+      { notBefore }
+    );
+    const free = [before, after].filter((m) => m !== null).map(minutesToTime);
     const reply = {
       content:
         `這個時段衝突了：烏魯莊園2 在 ${minutesToTime(minutes)} 已經有人預約（前後 5 分鐘內不可重複），請改個時間再留言一次。\n` +
-        `💡 最近的空檔：${minutesToTime(Math.max(minutes - 5, 0))}、${minutesToTime(Math.min(minutes + 5, 1439))}（示範用，不是真的計算結果）`,
+        (free.length ? `💡 最近的空檔：${free.join("、")}` : "💡 今天剩下的時段已經沒有空檔了，可以改約其他日期。"),
       allowedMentions: NO_PING,
     };
     if (url) {

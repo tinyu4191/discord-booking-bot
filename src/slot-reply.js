@@ -2,7 +2,7 @@
 // 獨立成一個模組（不碰 Discord client），方便單獨測試。
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle } from "discord.js";
 import { getConfirmedBookingsByDate, getSummaryPages } from "./db.js";
-import { findNearestFreeTimes } from "./booking-rules.js";
+import { findNearestFreeTimes, SUGGEST_MIN_LEAD_MINUTES } from "./booking-rules.js";
 import {
   chunkBookingsForSummary,
   formatDateLabel,
@@ -19,10 +19,13 @@ export function buildSlotReply(guildId, summaryRow, minutes, text) {
   let content = text;
 
   try {
-    const notBefore = bookingDate === getBookingDateToday() ? getCurrentTimeMinutes() + 1 : 0;
+    // 今天：建議的時間要比現在晚至少 SUGGEST_MIN_LEAD_MINUTES 分鐘（往前、往後兩側都套用）
+    const isToday = bookingDate === getBookingDateToday();
+    const notBefore = isToday ? getCurrentTimeMinutes() + SUGGEST_MIN_LEAD_MINUTES : 0;
     const { before, after } = findNearestFreeTimes(guildId, bookingDate, minutes, { notBefore });
     const free = [before, after].filter((m) => m !== null).map(minutesToTime);
     if (free.length) content += `\n💡 最近的空檔：${free.join("、")}`;
+    else if (isToday) content += "\n💡 今天剩下的時段已經沒有空檔了，可以改約其他日期。";
   } catch (err) {
     console.warn("計算最近空檔失敗：", err.message);
   }

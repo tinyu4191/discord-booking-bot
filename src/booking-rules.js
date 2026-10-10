@@ -24,31 +24,44 @@ export function checkBookingSlot(guildId, bookingDate, minutes, excludeBookingId
   return null;
 }
 
-// 找出某個時間點「前後最近一個可以預約的時間」，給衝突／鎖定的回覆當作改約參考（只是建議，不會自動預約）。
-// 判斷規則跟 checkBookingSlot 一致：不在鎖定時段（含頭尾）、跟其他預約相差至少 5 分鐘。
-// notBefore：往前找的下限（今天的話傳入現在的分鐘數，避免建議已經過去的時間）
-// 回傳 { before: 分鐘數|null, after: 分鐘數|null }
-export function findNearestFreeTimes(guildId, bookingDate, minutes, { notBefore = 0 } = {}) {
-  const blocked = getBlockedSlotsByDate(guildId, bookingDate);
-  const taken = getBookingsByDate(guildId, bookingDate)
-    .map((b) => timeToMinutes(b.scheduled_time))
-    .filter((m) => m !== null);
+// 建議空檔至少要比「現在」晚幾分鐘。預約提醒是開始前 1~5 分鐘才發，建議一個 1 分鐘後就開始的時間沒有意義
+export const SUGGEST_MIN_LEAD_MINUTES = 5;
 
-  const isFree = (m) => !blocked.some((slot) => isWithinBlockedSlot(m, slot)) && taken.every((t) => Math.abs(t - m) >= 5);
+// 找出某個時間點「前後最近一個可以預約的時間」（純計算，不碰資料庫，方便測試）。
+// 判斷規則跟 checkBookingSlot 一致：不在鎖定時段（含頭尾）、跟其他預約相差至少 5 分鐘。
+//   blockedSlots：鎖定時段陣列（含 start_time / end_time）
+//   takenMinutes：已被預約的時間（分鐘數）陣列
+//   notBefore：建議時間的下限（含）。今天的話傳入「現在 + 緩衝」，往前、往後兩側都不會建議比它早的時間
+// 回傳 { before: 分鐘數|null, after: 分鐘數|null }
+export function computeNearestFreeTimes({ blockedSlots, takenMinutes }, minutes, { notBefore = 0 } = {}) {
+  const lower = Math.max(0, notBefore);
+  const isFree = (m) =>
+    !blockedSlots.some((slot) => isWithinBlockedSlot(m, slot)) && takenMinutes.every((t) => Math.abs(t - m) >= 5);
 
   let before = null;
-  for (let m = minutes - 1; m >= Math.max(0, notBefore); m--) {
+  for (let m = minutes - 1; m >= lower; m--) {
     if (isFree(m)) {
       before = m;
       break;
     }
   }
+
+  // 往後找也要套用下限：想約的時間如果已經過去，往後第一個空檔也可能還在過去
   let after = null;
-  for (let m = minutes + 1; m <= 1439; m++) {
+  for (let m = Math.max(minutes + 1, lower); m <= 1439; m++) {
     if (isFree(m)) {
       after = m;
       break;
     }
   }
   return { before, after };
+}
+
+// 從資料庫讀出某天的鎖定時段與預約，再找前後最近的空檔
+export function findNearestFreeTimes(guildId, bookingDate, minutes, { notBefore = 0 } = {}) {
+  const blockedSlots = getBlockedSlotsByDate(guildId, bookingDate);
+  const takenMinutes = getBookingsByDate(guildId, bookingDate)
+    .map((b) => timeToMinutes(b.scheduled_time))
+    .filter((m) => m !== null);
+  return computeNearestFreeTimes({ blockedSlots, takenMinutes }, minutes, { notBefore });
 }
