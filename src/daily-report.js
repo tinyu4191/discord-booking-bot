@@ -13,7 +13,6 @@ import { formatDateLabel, getLocationEmoji, getWeekdayLabel, minutesToTime, time
 const BUCKET_HOURS = 3; // 時段熱度：每 3 小時一格，一天 8 格
 const BAR_WIDTH = 10;
 const MAX_LOCATION_ROWS = 6;
-const MAX_BLOCKED_ROWS = 4;
 const REPORT_COLOR = 0x1abc9c;
 
 // 續約自動新增的預約，message_id 是 "renew-<提醒編號>"（沒有對應的真實留言）
@@ -92,14 +91,6 @@ export function getDailyStats(guildId, bookingDate) {
 // ---------------------------------------------------------------------------
 // 版面
 // ---------------------------------------------------------------------------
-const MEDALS = ["🥇", "🥈", "🥉"];
-
-function formatDuration(minutes) {
-  const h = Math.floor(minutes / 60);
-  const m = minutes % 60;
-  if (h && m) return `${h} 小時 ${m} 分`;
-  return h ? `${h} 小時` : `${m} 分`;
-}
 
 function heatmapBlock(buckets) {
   const max = Math.max(...buckets.map((b) => b.count), 1);
@@ -119,46 +110,33 @@ export function buildDailyReportEmbed(bookingDate, stats, { formatBooker = (id) 
     .setFooter({ text: `預約機器人自動產生・統計範圍 00:00–24:00${demo ? "・示範資料" : ""}` });
 
   if (stats.total === 0) {
-    embed.setDescription(
-      "這一天沒有預約。" + (stats.cancelled ? `\n❌ 取消 **${stats.cancelled}** 筆` : "")
-    );
-  } else {
-    const lines = [
-      `共 **${stats.total}** 筆預約　👥 **${stats.uniqueBookers}** 位預約人`,
-      `🔁 續約 **${stats.renewedCount}**　🤝 代約 **${stats.proxyCount}**　❌ 取消 **${stats.cancelled}**`,
-    ];
-    if (stats.first) lines.push(`⏱ 最早 **${stats.first}**　最晚 **${stats.last}**`);
-    embed.setDescription(lines.join("\n"));
-
-    let heat = heatmapBlock(stats.hourBuckets);
-    if (stats.peak) {
-      const h = String(stats.peak.hour).padStart(2, "0");
-      heat += `\n尖峰：**${h}:00–${h}:59**（${stats.peak.count} 筆）`;
-    }
-    embed.addFields({ name: "🕒 時段熱度", value: heat });
-
-    const shown = stats.byLocation.slice(0, MAX_LOCATION_ROWS);
-    const rest = stats.byLocation.slice(MAX_LOCATION_ROWS);
-    const locLines = shown.map((l) => {
-      const pct = Math.round((l.count / stats.total) * 100);
-      return `${getLocationEmoji(l.location)} ${l.location}　**${l.count}** 筆（${pct}%）`;
-    });
-    if (rest.length) locLines.push(`…其他 ${rest.length} 處　**${rest.reduce((a, l) => a + l.count, 0)}** 筆`);
-    embed.addFields({ name: "📍 地點", value: locLines.join("\n") });
-
-    if (stats.topBookers.length) {
-      embed.addFields({
-        name: "🏆 預約最多",
-        value: stats.topBookers.map((b, i) => `${MEDALS[i]} ${formatBooker(b.bookerId)}　${b.count} 筆`).join("\n"),
-      });
-    }
+    embed.setDescription("這一天沒有預約。");
+    return embed;
   }
 
-  if (stats.blocked.count) {
-    const items = stats.blocked.items.slice(0, MAX_BLOCKED_ROWS).map((s) => `🔒 ${s.start}–${s.end}${s.reason ? `（${s.reason}）` : ""}`);
-    if (stats.blocked.items.length > MAX_BLOCKED_ROWS) items.push(`…還有 ${stats.blocked.items.length - MAX_BLOCKED_ROWS} 段`);
-    embed.addFields({ name: `🔒 鎖定時段（${stats.blocked.count} 段，共 ${formatDuration(stats.blocked.minutes)}）`, value: items.join("\n") });
+  const lines = [`共 **${stats.total}** 筆預約　👥 **${stats.uniqueBookers}** 位預約人`];
+  if (stats.first) lines.push(`⏱ 最早 **${stats.first}**　最晚 **${stats.last}**`);
+
+  lines.push("## 時段熱度", heatmapBlock(stats.hourBuckets));
+  if (stats.peak) {
+    const h = String(stats.peak.hour).padStart(2, "0");
+    lines.push(`\`尖峰：${h}:00–${h}:59（${stats.peak.count} 筆）\``);
   }
 
+  const shown = stats.byLocation.slice(0, MAX_LOCATION_ROWS);
+  const rest = stats.byLocation.slice(MAX_LOCATION_ROWS);
+  lines.push("## 地點");
+  for (const l of shown) {
+    const pct = Math.round((l.count / stats.total) * 100);
+    lines.push(`${getLocationEmoji(l.location)} ${l.location}　${l.count} 筆（${pct}%）`);
+  }
+  if (rest.length) lines.push(`…其他 ${rest.length} 處　${rest.reduce((a, l) => a + l.count, 0)} 筆`);
+
+  if (stats.topBookers.length) {
+    lines.push("## 預約最多");
+    stats.topBookers.forEach((b, i) => lines.push(`${i + 1}. ${formatBooker(b.bookerId)}　${b.count} 筆`));
+  }
+
+  embed.setDescription(lines.join("\n"));
   return embed;
 }

@@ -68,7 +68,7 @@ export function fakeDayStats(date) {
 
 const fakeBookerName = (id) => {
   const n = Number(String(id).replace("fake-", ""));
-  return `**${FAKE_NAMES[n] ?? id}**`;
+  return FAKE_NAMES[n] ?? id;
 };
 
 // ---------------------------------------------------------------------------
