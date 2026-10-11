@@ -63,6 +63,7 @@ import { buildSlotReply } from "./slot-reply.js";
 import { setupReminders } from "./reminders.js";
 import { setupPageUiDemo } from "./page-ui-demo.js";
 import { setupDailyReportDemo } from "./daily-report-demo.js";
+import { missingChannelPermissions, announcementNeeds } from "./perm-check.js";
 import { publishPendingReports, handleReportSubscriptionCommand } from "./daily-report-publisher.js";
 import {
   setupSummaryBoard,
@@ -469,14 +470,40 @@ async function handleBookingMessage(message, { isEdit }) {
 // 把公告推播到某個語音群的公告頻道，並確保 @everyone 真的會 ping 到人
 async function sendAnnouncement(guildSettings, text, files = []) {
   if (!guildSettings?.announcement_channel_id) {
-    console.warn("這個語音群沒有設定公告頻道，公告訊息略過推播：", text);
+    console.warn(`[${guildSettings?.guild_id}] 這個語音群沒有設定公告頻道，公告訊息略過推播：`, text);
     return;
   }
+  const guildId = guildSettings.guild_id;
+  const channelId = guildSettings.announcement_channel_id;
+  const payload = (withFiles) => ({ content: text, files: withFiles ? files : [], allowedMentions: { parse: ["everyone", "users"] } });
+  let channel = null;
   try {
-    const channel = await client.channels.fetch(guildSettings.announcement_channel_id);
-    await channel.send({ content: text, files, allowedMentions: { parse: ["everyone", "users"] } });
+    channel = await client.channels.fetch(channelId);
+    await channel.send(payload(true));
+    // 訊息發得出去，但缺「提及 @everyone」權限的話，Discord 不會報錯、只是不會通知任何人，這裡主動檢查並提醒
+    if (text.includes("@everyone")) {
+      const miss = await missingChannelPermissions(channel, announcementNeeds({ hasFiles: false, mentionsEveryone: true }));
+      if (miss?.includes("提及 @everyone、@here 和所有身分組")) {
+        await logToAdmin(guildSettings, `⚠️ 公告已發出，但機器人在公告頻道 <#${channelId}> 沒有「提及 @everyone」權限，所以不會通知到人。`);
+      }
+    }
   } catch (err) {
-    console.warn("公告推播失敗：", err.message);
+    const needs = announcementNeeds({ hasFiles: files.length > 0, mentionsEveryone: text.includes("@everyone") });
+    const missing = channel ? await missingChannelPermissions(channel, needs) : null;
+    const missingText = missing === null ? "無法判斷" : missing.length ? missing.join("、") : "權限看起來齊全（請檢查頻道類型或身分組覆寫）";
+    console.warn(`[${guildId}] 公告推播失敗（頻道 ${channelId}）：${err.message}｜機器人缺少的權限：${missingText}`);
+
+    // 附圖失敗就改成不附圖重發一次，至少讓大家看得到公告文字
+    if (channel && files.length) {
+      try {
+        await channel.send(payload(false));
+        await logToAdmin(guildSettings, `⚠️ 公告已發出，但沒附圖（機器人在 <#${channelId}> 缺少：${missingText}）。`);
+        return;
+      } catch (retryErr) {
+        console.warn(`[${guildId}] 不附圖重發也失敗：`, retryErr.message);
+      }
+    }
+    await logToAdmin(guildSettings, `⚠️ 公告發送失敗（${err.message}）。機器人在公告頻道 <#${channelId}> 缺少的權限：${missingText}。請補上後，手動貼一次公告。`);
   }
 }
 
