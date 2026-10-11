@@ -107,6 +107,8 @@ export function isWithinBlockedSlot(minutes, slot) {
 export function getLocationEmoji(location) {
   const name = location || "";
   if (name.includes("蝴蝶")) return "🦋";
+  if (name.includes("樹王")) return "🌳";
+  if (name.includes("炎魔")) return "🌋"; // 炎魔、困難炎魔都算
   if (name.includes("龍")) return "🐉";
   if (name.includes("武林") || name.includes("武陵") || name.includes("道場")) return "🥊";
   return "⚔️";
@@ -206,6 +208,8 @@ export function isBookingAttempt(content) {
 export function getAdminCommandType(content) {
   const firstLine = (content || "").trim().split("\n")[0].trim();
   if (/^功能查詢/.test(firstLine)) return "help";
+  if (/^取消訂閱/.test(firstLine)) return "report_unsubscribe";
+  if (/^訂閱報告/.test(firstLine)) return "report_subscribe";
   if (/^建立測試討論串/.test(firstLine)) return "create_test_thread";
   if (/^刪除測試討論串/.test(firstLine)) return "delete_test_thread";
   if (/^解除週期鎖定/.test(firstLine)) return "unblock_recurring";

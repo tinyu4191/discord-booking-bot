@@ -63,6 +63,7 @@ import { buildSlotReply } from "./slot-reply.js";
 import { setupReminders } from "./reminders.js";
 import { setupPageUiDemo } from "./page-ui-demo.js";
 import { setupDailyReportDemo } from "./daily-report-demo.js";
+import { publishPendingReports, handleReportSubscriptionCommand } from "./daily-report-publisher.js";
 import {
   setupSummaryBoard,
   refreshSummaryMessage,
@@ -125,6 +126,12 @@ async function lockPastThreadsForAllGuilds() {
       await lockPastThreads(settings);
     } catch (err) {
       console.error(`[${settings.guild_id}] 鎖定討論串時發生錯誤：`, err);
+    }
+    // 鎖定之後再發日報（讀最新的設定，剛好被人改過訂閱狀態也不會用到舊值）
+    try {
+      await publishPendingReports({ client, guildSettings: getGuildSettings(settings.guild_id) ?? settings, logToAdmin });
+    } catch (err) {
+      console.error(`[${settings.guild_id}] 發送日報時發生錯誤：`, err);
     }
   }
 }
@@ -490,6 +497,8 @@ async function handleAdminCommand(message, guildSettings) {
     await handleRecurringUnblockCommand(message, guildSettings);
   } else if (commandType === "list_recurring") {
     await handleRecurringListCommand(message, guildSettings);
+  } else if (commandType === "report_unsubscribe" || commandType === "report_subscribe") {
+    await handleReportSubscriptionCommand(message, guildSettings, commandType === "report_subscribe");
   } else if (commandType === "create_test_thread") {
     await handleCreateTestThreadCommand(message, guildSettings);
   } else if (commandType === "delete_test_thread") {
@@ -747,6 +756,7 @@ async function handleHelpCommand(message) {
     "```\n建立測試討論串：\n日期：YYYY-MM-DD\n```",
     "**刪除測試討論串** — 整串刪除測試討論串跟相關資料",
     "```\n刪除測試討論串：\n日期：YYYY-MM-DD\n```",
+    "**取消訂閱** / **訂閱報告** — 停止／恢復每天發到日報頻道的預約總結日報",
     "**功能查詢** — 顯示這份說明",
   ].join("\n");
 

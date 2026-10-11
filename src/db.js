@@ -22,6 +22,21 @@ function ensureColumn(table, column, ddl) {
   if (!cols.includes(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
 }
 ensureColumn("guild_settings", "reminder_channel_id", "reminder_channel_id TEXT");
+// 每日日報：report_channel_id 沒設定就不發；report_enabled 是管理頻道「取消訂閱／訂閱報告」切換的開關（預設訂閱中）
+ensureColumn("guild_settings", "report_channel_id", "report_channel_id TEXT");
+ensureColumn("guild_settings", "report_enabled", "report_enabled INTEGER NOT NULL DEFAULT 1");
+
+// 日報發送紀錄：每個語音群每一天最多一筆，避免重複發送。status = sent（已發）／skipped（當時取消訂閱，不補發）
+db.exec(`
+  CREATE TABLE IF NOT EXISTS daily_reports (
+    guild_id     TEXT NOT NULL,
+    report_date  TEXT NOT NULL,
+    status       TEXT NOT NULL,
+    message_id   TEXT,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (guild_id, report_date)
+  )
+`);
 
 // 預約主表：每一筆預約對應到討論串裡的一則留言（message_id），guild_id 區分是哪個語音群的資料
 db.exec(`
@@ -131,17 +146,18 @@ ensureColumn("booking_reminders", "finalized", "finalized INTEGER NOT NULL DEFAU
 
 export function upsertGuildSettings(
   guildId,
-  { bookingParentChannelId, adminChannelId, managementChannelId, announcementChannelId, reminderChannelId }
+  { bookingParentChannelId, adminChannelId, managementChannelId, announcementChannelId, reminderChannelId, reportChannelId }
 ) {
   db.prepare(`
-    INSERT INTO guild_settings (guild_id, booking_parent_channel_id, admin_channel_id, management_channel_id, announcement_channel_id, reminder_channel_id)
-    VALUES (@guildId, @bookingParentChannelId, @adminChannelId, @managementChannelId, @announcementChannelId, @reminderChannelId)
+    INSERT INTO guild_settings (guild_id, booking_parent_channel_id, admin_channel_id, management_channel_id, announcement_channel_id, reminder_channel_id, report_channel_id)
+    VALUES (@guildId, @bookingParentChannelId, @adminChannelId, @managementChannelId, @announcementChannelId, @reminderChannelId, @reportChannelId)
     ON CONFLICT(guild_id) DO UPDATE SET
       booking_parent_channel_id = excluded.booking_parent_channel_id,
       admin_channel_id = excluded.admin_channel_id,
       management_channel_id = excluded.management_channel_id,
       announcement_channel_id = excluded.announcement_channel_id,
-      reminder_channel_id = excluded.reminder_channel_id
+      reminder_channel_id = excluded.reminder_channel_id,
+      report_channel_id = excluded.report_channel_id
   `).run({
     guildId,
     bookingParentChannelId,
@@ -149,6 +165,7 @@ export function upsertGuildSettings(
     managementChannelId: managementChannelId || null,
     announcementChannelId: announcementChannelId || null,
     reminderChannelId: reminderChannelId || null,
+    reportChannelId: reportChannelId || null,
   });
 }
 
@@ -158,6 +175,31 @@ export function getGuildSettings(guildId) {
 
 export function getAllGuildSettings() {
   return db.prepare(`SELECT * FROM guild_settings`).all();
+}
+
+// ---- 每日日報 ----
+
+export function setReportEnabled(guildId, enabled) {
+  db.prepare(`UPDATE guild_settings SET report_enabled = ? WHERE guild_id = ?`).run(enabled ? 1 : 0, guildId);
+}
+
+// 已鎖定、日期落在 [fromDate, toDate] 的班表（日期由舊到新）。日報只會針對「討論串真的存在而且已鎖定」的日子發
+export function getLockedSummariesBetween(guildId, fromDate, toDate) {
+  return db.prepare(`
+    SELECT * FROM daily_summary
+    WHERE guild_id = ? AND locked = 1 AND booking_date >= ? AND booking_date <= ?
+    ORDER BY booking_date ASC
+  `).all(guildId, fromDate, toDate);
+}
+
+export function getDailyReportRecord(guildId, reportDate) {
+  return db.prepare(`SELECT * FROM daily_reports WHERE guild_id = ? AND report_date = ?`).get(guildId, reportDate);
+}
+
+export function recordDailyReport(guildId, reportDate, status, messageId = null) {
+  db.prepare(`
+    INSERT OR IGNORE INTO daily_reports (guild_id, report_date, status, message_id) VALUES (?, ?, ?, ?)
+  `).run(guildId, reportDate, status, messageId);
 }
 
 export function deleteGuildSettings(guildId) {
