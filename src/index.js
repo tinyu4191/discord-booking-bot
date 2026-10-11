@@ -62,6 +62,7 @@ import { checkBookingSlot } from "./booking-rules.js";
 import { buildSlotReply } from "./slot-reply.js";
 import { setupReminders } from "./reminders.js";
 import { setupPageUiDemo } from "./page-ui-demo.js";
+import { setupDailyReportDemo } from "./daily-report-demo.js";
 import {
   setupSummaryBoard,
   refreshSummaryMessage,
@@ -91,6 +92,7 @@ client.once(Events.ClientReady, async () => {
   setupReminders({ client, refreshSummaryMessage, logToAdmin });
   // 班表翻頁 UI 試作（假資料）：只有 .env 設了 DEMO_GUILD_ID 才會啟用，只註冊到那個測試伺服器
   setupPageUiDemo(client);
+  setupDailyReportDemo(client); // 每日日報版面試作（假資料 / 真實資料），同樣只在 DEMO_GUILD_ID 的測試伺服器出現
   await ensureUpcomingThreadsForAllGuilds();
   await lockPastThreadsForAllGuilds();
   // 還沒過期（今天含以後）的班表，從舊版的「多則分頁訊息」換成新版的「單一訊息 + 翻頁」，並刪掉多餘的分頁訊息。

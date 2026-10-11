@@ -37,7 +37,7 @@ const IDLE_CHECK_INTERVAL_MS = 30 * 1000;
 // ---------------------------------------------------------------------------
 // 假資料：同一天永遠產生同樣的內容（用日期當亂數種子），所以重啟、重複按都一致
 // ---------------------------------------------------------------------------
-function seededRandom(seedText) {
+export function seededRandom(seedText) {
   let h = 1779033703;
   for (let i = 0; i < seedText.length; i++) {
     h = Math.imul(h ^ seedText.charCodeAt(i), 3432918353);
