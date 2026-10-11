@@ -42,7 +42,10 @@ async function main() {
       ["管理頻道 (management_channel_id)", settings.management_channel_id],
       ["公告頻道 (announcement_channel_id)", settings.announcement_channel_id],
       ["提醒頻道 (reminder_channel_id)", settings.reminder_channel_id],
+      ["日報頻道 (report_channel_id)", settings.report_channel_id],
     ];
+
+    if (settings.report_channel_id) console.log(`  日報訂閱狀態：${settings.report_enabled ? "訂閱中" : "已取消訂閱"}`);
 
     for (const [label, channelId] of channelLabels) {
       if (!channelId) {

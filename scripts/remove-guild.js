@@ -44,6 +44,7 @@ const counts = {
   blocked_slots: countRows("blocked_slots"),
   recurring_blocked_slots: countRows("recurring_blocked_slots"),
   booking_reminders: countRows("booking_reminders"),
+  daily_reports: countRows("daily_reports"),
 };
 console.log("\n目前這個語音群的資料量：");
 console.log(counts);
@@ -75,6 +76,7 @@ async function main() {
       db.prepare(`DELETE FROM blocked_slots WHERE guild_id = ?`).run(guildId);
       db.prepare(`DELETE FROM recurring_blocked_slots WHERE guild_id = ?`).run(guildId);
       db.prepare(`DELETE FROM booking_reminders WHERE guild_id = ?`).run(guildId);
+      db.prepare(`DELETE FROM daily_reports WHERE guild_id = ?`).run(guildId);
       deleteGuildSettings(guildId);
     });
     purgeAll();
