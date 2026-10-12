@@ -75,6 +75,7 @@ import {
   setupSummaryBoard,
   refreshSummaryMessage,
   migrateLegacySummaries,
+  rechunkOversizedSummaries,
   showSummaryPageForMinutes,
 } from "./summary-board.js";
 
@@ -106,6 +107,8 @@ client.once(Events.ClientReady, async () => {
   // 還沒過期（今天含以後）的班表，從舊版的「多則分頁訊息」換成新版的「單一訊息 + 翻頁」，並刪掉多餘的分頁訊息。
   // 只會處理還沒換過的（layout_version = 0），換完之後每次啟動都不會重複處理
   await migrateLegacySummaries();
+  // 每頁最多 25 筆（SUMMARY_MAX_PER_PAGE）：筆數超過的班表現在就重新分頁
+  await rechunkOversizedSummaries().catch((err) => console.warn("重新分頁時發生錯誤：", err.message));
   // 還沒過期的討論串，引導訊息換成新文案（加註「請直接編輯留言」）。只處理還沒換過的
   await refreshGuideMessages({ client }).catch((err) => console.warn("更新引導訊息時發生錯誤：", err.message));
   // 每天 23:59：鎖定「今天」的討論串並發日報（BOT_TIMEZONE 時區，預設台灣）。這個排程明確把今天也算進去；

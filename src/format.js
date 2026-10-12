@@ -155,6 +155,14 @@ const SUMMARY_LINE_SEPARATOR = "\n\n";
 // 所以抓更保守的門檻，降低觸發機率
 const MAX_SUMMARY_DESCRIPTION_LENGTH = 1500;
 
+// 每一頁最多放幾筆預約（有人反應每頁最後一筆有時候會被截斷，所以限制筆數，讓每頁內容短一點）。
+// 預設 25 筆，可以在 .env 設定 SUMMARY_MAX_PER_PAGE 調整；跟上面的字數上限同時生效，先到的先換頁
+const DEFAULT_MAX_BOOKINGS_PER_PAGE = 25;
+export function getMaxBookingsPerPage() {
+  const n = Number(process.env.SUMMARY_MAX_PER_PAGE);
+  return Number.isInteger(n) && n >= 1 ? n : DEFAULT_MAX_BOOKINGS_PER_PAGE;
+}
+
 // 把預約清單依照長度上限切成多頁，確保每一頁的 embed description 都不會超過 Discord 限制。
 // 沒有預約時也會回傳一個空陣列的頁面，讓呼叫端能正常顯示「目前尚無預約」
 export function chunkBookingsForSummary(bookings) {
@@ -165,12 +173,13 @@ export function chunkBookingsForSummary(bookings) {
   const pages = [];
   let current = [];
   let currentLength = 0;
+  const maxPerPage = getMaxBookingsPerPage();
 
   for (const b of sorted) {
     const line = formatBookingLine(b);
     const addLength = line.length + (current.length > 0 ? SUMMARY_LINE_SEPARATOR.length : 0);
 
-    if (current.length > 0 && currentLength + addLength > MAX_SUMMARY_DESCRIPTION_LENGTH) {
+    if (current.length > 0 && (current.length >= maxPerPage || currentLength + addLength > MAX_SUMMARY_DESCRIPTION_LENGTH)) {
       pages.push(current);
       current = [];
       currentLength = 0;

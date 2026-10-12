@@ -29,6 +29,7 @@ import {
   buildSummaryComponents,
   buildSummaryEmbed,
   chunkBookingsForSummary,
+  getMaxBookingsPerPage,
   clampPage,
   defaultPageIndex,
   getBookingDateToday,
@@ -174,6 +175,32 @@ export async function migrateLegacySummaries({ delayMs = 500 } = {}) {
     }
   }
   return migrated;
+}
+
+// ---------------------------------------------------------------------------
+// 啟動時：每頁筆數上限調整後（SUMMARY_MAX_PER_PAGE，預設 25），已經存在、筆數超過上限的班表重新排版一次，
+// 這樣不用等到有人預約才套用新的分頁
+// ---------------------------------------------------------------------------
+export async function rechunkOversizedSummaries({ delayMs = 500 } = {}) {
+  let count = 0;
+  const today = getBookingDateToday();
+  const maxPerPage = getMaxBookingsPerPage();
+
+  for (const settings of getAllGuildSettings()) {
+    for (const row of getActiveSummaries(settings.guild_id, today)) {
+      if (row.layout_version !== 1) continue; // 舊版面的由 migrateLegacySummaries 處理
+      try {
+        if (getConfirmedBookingsByDate(row.guild_id, row.booking_date).length <= maxPerPage) continue;
+        await refreshSummaryMessage(row.guild_id, row.booking_date);
+        count++;
+        console.log(`[${row.guild_id}] 班表已依每頁 ${maxPerPage} 筆重新分頁：${row.booking_date}`);
+      } catch (err) {
+        console.warn(`[${row.guild_id}] 班表重新分頁失敗 (${row.booking_date})：`, err.message);
+      }
+      if (delayMs) await sleep(delayMs);
+    }
+  }
+  return count;
 }
 
 // ---------------------------------------------------------------------------
