@@ -208,6 +208,19 @@ export function deleteGuildSettings(guildId) {
   db.prepare(`DELETE FROM guild_settings WHERE guild_id = ?`).run(guildId);
 }
 
+// 週期鎖定可以一條規則涵蓋多個星期（例如「每天」）：weekday_mask 是 7 個位元（bit0=週日 ... bit6=週六），
+// NULL 代表舊資料，等同只有 weekday 那一天。單日手動改過的鎖定（detached = 1）之後修改週期規則時不會被覆蓋；
+// 單日被解除的週期鎖定要記在例外表，之後修改規則時才不會又被「復活」
+ensureColumn("recurring_blocked_slots", "weekday_mask", "weekday_mask INTEGER");
+ensureColumn("blocked_slots", "detached", "detached INTEGER NOT NULL DEFAULT 0");
+db.exec(`
+  CREATE TABLE IF NOT EXISTS recurring_exceptions (
+    rule_id      INTEGER NOT NULL,
+    booking_date TEXT NOT NULL,
+    PRIMARY KEY (rule_id, booking_date)
+  )
+`);
+
 // ---- 預約 ----
 
 export function insertBooking({ guildId, bookingDate, messageId, location, time, channel, bookerId, proxyFor }) {
@@ -526,19 +539,61 @@ export function purgeOldReminders(days) {
 
 // ---- 週期鎖定樣板 ----
 
-export function insertRecurringBlockedSlot({ guildId, weekday, startTime, endTime, reason }) {
+// 規則涵蓋的星期遮罩（舊資料沒有 weekday_mask，就是只有 weekday 那一天）
+export function ruleWeekdayMask(rule) {
+  return rule.weekday_mask ?? 1 << rule.weekday;
+}
+
+const lowestWeekday = (mask) => [0, 1, 2, 3, 4, 5, 6].find((d) => mask & (1 << d)) ?? 0;
+
+// weekdayMask 沒給就用 weekday 那一天。weekday 欄位存遮罩裡最小的星期（舊指令的相容用）
+export function insertRecurringBlockedSlot({ guildId, weekday, weekdayMask, startTime, endTime, reason }) {
+  const mask = weekdayMask ?? 1 << weekday;
   const stmt = db.prepare(`
-    INSERT INTO recurring_blocked_slots (guild_id, weekday, start_time, end_time, reason)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO recurring_blocked_slots (guild_id, weekday, weekday_mask, start_time, end_time, reason)
+    VALUES (?, ?, ?, ?, ?, ?)
   `);
-  const result = stmt.run(guildId, weekday, startTime, endTime, reason || null);
+  const result = stmt.run(guildId, weekdayMask === undefined ? weekday : lowestWeekday(mask), mask, startTime, endTime, reason || null);
   return result.lastInsertRowid;
 }
 
+export function updateRecurringBlockedSlot(id, { weekdayMask, startTime, endTime, reason }) {
+  db.prepare(`
+    UPDATE recurring_blocked_slots SET weekday = ?, weekday_mask = ?, start_time = ?, end_time = ?, reason = ? WHERE id = ?
+  `).run(lowestWeekday(weekdayMask), weekdayMask, startTime, endTime, reason || null, id);
+}
+
 export function getRecurringBlockedSlotsByWeekday(guildId, weekday) {
+  return db
+    .prepare(`SELECT * FROM recurring_blocked_slots WHERE guild_id = ? ORDER BY start_time`)
+    .all(guildId)
+    .filter((r) => ruleWeekdayMask(r) & (1 << weekday));
+}
+
+// 修改單日鎖定。detached = 1 代表這一天是手動改過的（週期規則之後修改不再覆蓋它）
+export function updateBlockedSlot(id, { startTime, endTime, reason, detached }) {
+  db.prepare(`UPDATE blocked_slots SET start_time = ?, end_time = ?, reason = ?, detached = ? WHERE id = ?`).run(
+    startTime, endTime, reason || null, detached ? 1 : 0, id
+  );
+}
+
+// 從今天（含）起的鎖定，給指令的自動完成選單用
+export function getUpcomingBlockedSlots(guildId, fromDate) {
   return db.prepare(`
-    SELECT * FROM recurring_blocked_slots WHERE guild_id = ? AND weekday = ? ORDER BY start_time
-  `).all(guildId, weekday);
+    SELECT * FROM blocked_slots WHERE guild_id = ? AND booking_date >= ? ORDER BY booking_date, start_time
+  `).all(guildId, fromDate);
+}
+
+export function addRecurringException(ruleId, bookingDate) {
+  db.prepare(`INSERT OR IGNORE INTO recurring_exceptions (rule_id, booking_date) VALUES (?, ?)`).run(ruleId, bookingDate);
+}
+
+export function hasRecurringException(ruleId, bookingDate) {
+  return !!db.prepare(`SELECT 1 FROM recurring_exceptions WHERE rule_id = ? AND booking_date = ?`).get(ruleId, bookingDate);
+}
+
+export function deleteRecurringExceptions(ruleId) {
+  db.prepare(`DELETE FROM recurring_exceptions WHERE rule_id = ?`).run(ruleId);
 }
 
 export function getAllRecurringBlockedSlots(guildId) {

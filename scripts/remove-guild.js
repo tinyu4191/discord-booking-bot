@@ -74,6 +74,7 @@ async function main() {
       db.prepare(`DELETE FROM daily_summary WHERE guild_id = ?`).run(guildId);
       db.prepare(`DELETE FROM summary_pages WHERE guild_id = ?`).run(guildId);
       db.prepare(`DELETE FROM blocked_slots WHERE guild_id = ?`).run(guildId);
+      db.prepare(`DELETE FROM recurring_exceptions WHERE rule_id IN (SELECT id FROM recurring_blocked_slots WHERE guild_id = ?)`).run(guildId);
       db.prepare(`DELETE FROM recurring_blocked_slots WHERE guild_id = ?`).run(guildId);
       db.prepare(`DELETE FROM booking_reminders WHERE guild_id = ?`).run(guildId);
       db.prepare(`DELETE FROM daily_reports WHERE guild_id = ?`).run(guildId);

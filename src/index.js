@@ -23,6 +23,8 @@ import {
   getRecurringBlockedSlotById,
   insertRecurringBlockedSlot,
   deleteRecurringBlockedSlot,
+  addRecurringException,
+  ruleWeekdayMask,
   getConfirmedBookingsByDate,
   getSummaryMessage,
   getSummaryByThreadId,
@@ -61,6 +63,7 @@ import {
   parseTestThreadCommand,
   parseMMDDToFullDate,
   buildSummaryEmbed,
+  formatWeekdayMask,
   EDIT_RETRY_HINT,
 } from "./format.js";
 import { checkBookingSlot, shouldRejectPastBooking } from "./booking-rules.js";
@@ -68,6 +71,8 @@ import { buildSlotReply } from "./slot-reply.js";
 import { setupReminders } from "./reminders.js";
 import { setupPageUiDemo } from "./page-ui-demo.js";
 import { setupDailyReportDemo } from "./daily-report-demo.js";
+import { materializeRecurringBlocksForDate as materializeRecurringBlocksForDateImpl, removeWeekly } from "./block-ops.js";
+import { setupSlashCommands, registerSlashCommands } from "./slash-commands.js";
 import { refreshGuideMessages } from "./guide-refresh.js";
 import { missingChannelPermissions, announcementNeeds } from "./perm-check.js";
 import { publishPendingReports, handleReportSubscriptionCommand } from "./daily-report-publisher.js";
@@ -91,6 +96,19 @@ const client = new Client({
 // 班表翻頁（單一訊息 + 按鈕／下拉選單）、閒置自動復位。要在其他地方呼叫 refreshSummaryMessage 之前先註冊好 client
 setupSummaryBoard(client);
 
+// 管理用斜線指令（/lock、/weekly、/report、/testthread、/help）。舊文字指令的處理函式共用同一份邏輯
+setupSlashCommands(client, {
+  legacy: {
+    block: (m, s) => handleBlockCommand(m, s),
+    unblock: (m, s) => handleUnblockCommand(m, s),
+    weekList: (m, s) => handleWeekListCommand(m, s),
+    recurringList: (m, s) => handleRecurringListCommand(m, s),
+    createTestThread: (m, s) => handleCreateTestThreadCommand(m, s),
+    deleteTestThread: (m, s) => handleDeleteTestThreadCommand(m, s),
+  },
+  opsDeps: (settings) => blockOpsDeps(settings),
+});
+
 // 0=週日 ... 6=週六 對應的星期圖片檔名，請把對應圖片放到 assets/weekday/ 底下
 const WEEKDAY_IMAGE_FILES = ["sun.png", "mon.png", "tue.png", "wed.png", "thu.png", "fri.png", "sat.png"];
 
@@ -101,6 +119,7 @@ client.once(Events.ClientReady, async () => {
   setupReminders({ client, refreshSummaryMessage, logToAdmin });
   // 班表翻頁 UI 試作（假資料）：只有 .env 設了 DEMO_GUILD_ID 才會啟用，只註冊到那個測試伺服器
   setupPageUiDemo(client);
+  await registerSlashCommands(client).catch((err) => console.warn("註冊斜線指令時發生錯誤：", err.message));
   setupDailyReportDemo(client); // 每日日報版面試作（假資料 / 真實資料），同樣只在 DEMO_GUILD_ID 的測試伺服器出現
   await ensureUpcomingThreadsForAllGuilds();
   await lockPastThreadsForAllGuilds();
@@ -305,24 +324,9 @@ async function createDailyThread(parent, guildId, bookingDate) {
   await announceBlockedSlotsForNewThread(guildSettings, bookingDate);
 }
 
-// 依週期鎖定樣板，把「今天符合星期幾的樣板」自動轉成一筆單次鎖定紀錄。
-// 如果同一天同時段已經有人手動先設定過一次性鎖定，就不會重複產生。
+// 依週期鎖定樣板，把「這天符合星期的樣板」自動轉成單次鎖定紀錄（邏輯在 block-ops.js：支援多星期、尊重被解除的例外日）
 async function materializeRecurringBlocksForDate(guildId, bookingDate) {
-  const weekday = getWeekdayIndex(bookingDate);
-  const templates = getRecurringBlockedSlotsByWeekday(guildId, weekday);
-
-  for (const tpl of templates) {
-    const existing = getBlockedSlotByDateTimeRange(guildId, bookingDate, tpl.start_time, tpl.end_time);
-    if (existing) continue;
-    insertBlockedSlot({
-      guildId,
-      bookingDate,
-      startTime: tpl.start_time,
-      endTime: tpl.end_time,
-      reason: tpl.reason,
-      sourceRecurringId: tpl.id,
-    });
-  }
+  materializeRecurringBlocksForDateImpl(guildId, bookingDate);
 }
 
 // 討論串一建立，掃描當天有沒有鎖定時段（含週期樣板剛產生出來的），有的話同步公告
@@ -681,10 +685,9 @@ async function handleRecurringListCommand(message, guildSettings) {
     return;
   }
 
-  const weekdayChars = "日一二三四五六";
   const lines = slots.map((s) => {
     const reasonText = s.reason ? `｜${s.reason}` : "";
-    return `#${s.id}｜每週${weekdayChars[s.weekday]}｜${s.start_time}~${s.end_time}${reasonText}`;
+    return `#${s.id}｜${formatWeekdayMask(ruleWeekdayMask(s))}｜${s.start_time}~${s.end_time}${reasonText}`;
   });
 
   await message.reply(`📋 目前的週期鎖定設定：\n${lines.join("\n")}`).catch(() => {});
@@ -768,44 +771,26 @@ async function handleRecurringBlockCommand(message, guildSettings) {
   await logToAdmin(guildSettings, `🚫 已設定週期鎖定：每週${weekdayLabel} ${start}~${end}${reasonText}，取消 ${totalAffected} 筆預約`);
 }
 
-// 「解除週期鎖定」指令
+// 「解除週期鎖定」指令（邏輯在 block-ops.js，斜線指令 /weekly remove 共用）
 async function handleRecurringUnblockCommand(message, guildSettings) {
   const { id } = parseUnblockCommand(message.content);
   if (!id) {
     await message.reply("請附上要解除的編號，例如：\n```\n解除週期鎖定：\n編號：3\n```").catch(() => {});
     return;
   }
+  const result = await removeWeekly(guildSettings.guild_id, id, blockOpsDeps(guildSettings));
+  await message.reply(result.message).catch(() => {});
+}
 
-  const slot = getRecurringBlockedSlotById(id);
-  if (!slot || slot.guild_id !== guildSettings.guild_id) {
-    await message.reply(`找不到編號 #${id} 的週期鎖定設定。`).catch(() => {});
-    return;
-  }
-
-  deleteRecurringBlockedSlot(id);
-  const weekdayLabel = "日一二三四五六"[slot.weekday];
-
-  const today = getBookingDateToday();
-  const materialized = getBlockedSlotsBySourceRecurringId(id).filter((s) => s.booking_date >= today);
-  for (const m of materialized) {
-    deleteBlockedSlot(m.id);
-  }
-
-  await message
-    .reply(
-      `已解除每週${weekdayLabel} ${slot.start_time}~${slot.end_time} 的固定鎖定（編號 #${id}），` +
-        `同時清除了 ${materialized.length} 筆已經產生、還沒發生的鎖定。`
-    )
-    .catch(() => {});
-
-  const unlockImage = buildAnnouncementAttachment("unlock.png");
-  await sendAnnouncement(
-    guildSettings,
-    `@everyone 📢 公告：每週${weekdayLabel} ${slot.start_time} ~ ${slot.end_time} 恢復開放預約囉！`,
-    unlockImage ? [unlockImage] : []
-  );
-
-  await logToAdmin(guildSettings, `✅ 已解除週期鎖定 #${id}（每週${weekdayLabel} ${slot.start_time}~${slot.end_time}）`);
+// block-ops.js 需要的外部動作（發公告、寫紀錄、更新班表、解除公告的圖）
+function blockOpsDeps(guildSettings) {
+  return {
+    settings: guildSettings,
+    sendAnnouncement,
+    logToAdmin,
+    refreshSummary: refreshSummaryMessage,
+    unlockImage: () => buildAnnouncementAttachment("unlock.png"),
+  };
 }
 
 // 「功能查詢」指令：列出管理頻道所有可用指令跟格式
@@ -829,6 +814,8 @@ async function handleHelpCommand(message) {
     "```\n刪除測試討論串：\n日期：YYYY-MM-DD\n```",
     "**取消訂閱** / **訂閱報告** — 停止／恢復每天發到日報頻道的預約總結日報",
     "**功能查詢** — 顯示這份說明",
+    "",
+    "💡 現在也可以改用斜線指令（輸入 `/` 就有選單）：`/lock`、`/weekly`、`/report`、`/testthread`、`/help`，回覆只有你看得到，編號跟日期都能用選單挑。",
   ].join("\n");
 
   await message.reply(helpText).catch(() => {});
@@ -911,6 +898,8 @@ async function handleUnblockCommand(message, guildSettings) {
   }
 
   deleteBlockedSlot(id);
+  // 週期鎖定產生的那一天被解除：記下例外，之後修改週期規則時不會又把這一天鎖回來
+  if (slot.source_recurring_id) addRecurringException(slot.source_recurring_id, slot.booking_date);
   await message
     .reply(`已解除鎖定 #${id}（${slot.booking_date} ${slot.start_time}~${slot.end_time}）。`)
     .catch(() => {});

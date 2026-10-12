@@ -305,17 +305,43 @@ export function parseWeekdayInput(input) {
   return null;
 }
 
-// 把 "MM/DD" 轉成完整的 YYYY-MM-DD（用今年的年份），格式錯誤回傳 null
+// 把 "MM/DD" 轉成完整的 YYYY-MM-DD（預設用今年；年底打明年一月的日期、也就是比今天早超過半年的，會改用明年）。
+// 也接受完整的 YYYY-MM-DD。格式錯誤或不存在的日期回傳 null
 export function parseMMDDToFullDate(input) {
   const trimmed = (input || "").trim();
+  const full = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   const match = trimmed.match(/^(\d{1,2})\/(\d{1,2})$/);
-  if (!match) return null;
+  if (!full && !match) return null;
 
   const todayStr = getBookingDateToday();
-  const year = Number(todayStr.slice(0, 4));
-  const month = String(Number(match[1])).padStart(2, "0");
-  const day = String(Number(match[2])).padStart(2, "0");
-  return `${year}-${month}-${day}`;
+  let year = full ? Number(full[1]) : Number(todayStr.slice(0, 4));
+  const month = String(Number(full ? full[2] : match[1])).padStart(2, "0");
+  const day = String(Number(full ? full[3] : match[2])).padStart(2, "0");
+  let result = `${year}-${month}-${day}`;
+  if (!full && result < addDays(todayStr, -180)) result = `${year + 1}-${month}-${day}`;
+
+  const check = new Date(`${result}T00:00:00Z`);
+  return Number.isNaN(check.getTime()) || check.toISOString().slice(0, 10) !== result ? null : result;
+}
+
+// ---- 週期鎖定的星期遮罩（bit0=週日 ... bit6=週六）----
+export const ALL_WEEKDAYS_MASK = 0b1111111;
+const WEEKDAY_CHARS = "日一二三四五六";
+
+// 遮罩 → 顯示文字：每天／平日（一~五）／假日（六日）／每週一、三、五
+export function formatWeekdayMask(mask) {
+  if (mask === ALL_WEEKDAYS_MASK) return "每天";
+  if (mask === 0b0111110) return "平日（一~五）";
+  if (mask === 0b1000001) return "假日（六日）";
+  const days = [...WEEKDAY_CHARS].filter((_, i) => mask & (1 << i));
+  return `每週${days.join("、")}`;
+}
+
+// 指令選項的值 → 遮罩。支援 everyday / weekdays / weekends / sun mon tue wed thu fri sat；不認得回傳 null
+export function parseDaysOption(value) {
+  const v = String(value || "").trim().toLowerCase();
+  const map = { everyday: ALL_WEEKDAYS_MASK, weekdays: 0b0111110, weekends: 0b1000001, sun: 1, mon: 2, tue: 4, wed: 8, thu: 16, fri: 32, sat: 64 };
+  return map[v] ?? null;
 }
 
 // 解析使用者在討論串留的固定格式留言
