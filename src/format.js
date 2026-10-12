@@ -2,6 +2,10 @@
 import { ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, StringSelectMenuBuilder } from "discord.js";
 
 // 固定不變的格式教學（討論串建立時發一次，不會再被編輯）
+// 預約被擋下來（格式錯、時間過去、衝突、鎖定）時附在機器人回覆最後的引導：
+// 大部分人不會去看討論串最上面的說明，只有出錯時才會認真看機器人的回覆，所以在這裡教他「直接編輯，不要刪除重打」
+export const EDIT_RETRY_HINT = "✏️ 不用刪除重打：直接點這則留言的「編輯」，改好內容就會自動重新送出。";
+
 export function formatGuideText(bookingDate) {
   const header = `【${formatDateLabel(bookingDate)} (${getWeekdayLabel(bookingDate)}) 預約說明】`;
   return (

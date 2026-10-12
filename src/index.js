@@ -61,6 +61,7 @@ import {
   parseTestThreadCommand,
   parseMMDDToFullDate,
   buildSummaryEmbed,
+  EDIT_RETRY_HINT,
 } from "./format.js";
 import { checkBookingSlot, shouldRejectPastBooking } from "./booking-rules.js";
 import { buildSlotReply } from "./slot-reply.js";
@@ -400,7 +401,7 @@ async function handleBookingMessage(message, { isEdit }) {
     await safeReact(message, "❌");
     await message
       .reply(
-        "格式好像不太對，請確認有填「地點」跟「時間」，例如：\n```\n地點：龍王\n時間：21:30\n頻道：當日決定\n```"
+        "格式好像不太對，請確認有填「地點」跟「時間」，例如：\n```\n地點：龍王\n時間：21:30\n頻道：當日決定\n```\n" + EDIT_RETRY_HINT
       )
       .catch(() => {});
     return;
@@ -409,7 +410,7 @@ async function handleBookingMessage(message, { isEdit }) {
   const newMinutes = timeToMinutes(time);
   if (newMinutes === null) {
     await safeReact(message, "❌");
-    await message.reply("時間格式看起來不對，請用 24 小時制 HH:MM，例如 21:30。").catch(() => {});
+    await message.reply("時間格式看起來不對，請用 24 小時制 HH:MM，例如 21:30。\n" + EDIT_RETRY_HINT).catch(() => {});
     return;
   }
 
@@ -428,7 +429,8 @@ async function handleBookingMessage(message, { isEdit }) {
           summaryRow,
           newMinutes,
           `⏰ ${time} 已經過去了（現在 ${nowText}），預約要登記「之後」的時段，請改一個還沒到的時間。` +
-            (existingBooking ? "\n（原本的預約沒有變動）" : "")
+            (existingBooking ? "\n（原本的預約沒有變動）" : ""),
+          EDIT_RETRY_HINT
         )
       )
       .catch(() => {});
@@ -450,7 +452,8 @@ async function handleBookingMessage(message, { isEdit }) {
           guildId,
           summaryRow,
           newMinutes,
-          `這個時段（${blockedSlot.start_time} ~ ${blockedSlot.end_time}）目前不開放預約${blockedSlot.reason ? `（原因：${blockedSlot.reason}）` : ""}，請選擇其他時間。`
+          `這個時段（${blockedSlot.start_time} ~ ${blockedSlot.end_time}）目前不開放預約${blockedSlot.reason ? `（原因：${blockedSlot.reason}）` : ""}，請選擇其他時間。`,
+          EDIT_RETRY_HINT
         )
       )
       .catch(() => {});
@@ -467,7 +470,8 @@ async function handleBookingMessage(message, { isEdit }) {
           guildId,
           summaryRow,
           newMinutes,
-          `這個時段衝突了：${conflict.location} 在 ${conflict.scheduled_time} 已經有人預約（前後 5 分鐘內不可重複），請改個時間再留言一次。`
+          `這個時段衝突了：${conflict.location} 在 ${conflict.scheduled_time} 已經有人預約（前後 5 分鐘內不可重複），請改個時間。`,
+          EDIT_RETRY_HINT
         )
       )
       .catch(() => {});

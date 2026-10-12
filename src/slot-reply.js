@@ -11,7 +11,8 @@ import {
 
 // 預約被擋下來（衝突／鎖定）時的回覆：原本的說明文字 + 最近的空檔建議 + 直接跳到當天班表的連結按鈕。
 // 連結指到當天班表訊息；班表可能分好幾頁，由呼叫端先切到「想預約的時間」所在那一頁
-export function buildSlotReply(guildId, summaryRow, minutes, text) {
+// footer：選填，附在最後面的一行引導文字（例如 EDIT_RETRY_HINT）
+export function buildSlotReply(guildId, summaryRow, minutes, text, footer = "") {
   const bookingDate = summaryRow.booking_date;
   let content = text;
 
@@ -27,6 +28,7 @@ export function buildSlotReply(guildId, summaryRow, minutes, text) {
     console.warn("計算最近空檔失敗：", err.message);
   }
 
+  if (footer) content += `\n${footer}`;
   const reply = { content };
   // 班表現在是單一訊息（翻頁都在這則訊息上），連結一律指到它；
   // 呼叫端會在回覆前先把班表切到「想預約的時間所在的那一頁」，所以點過去看到的就是對的那一頁
