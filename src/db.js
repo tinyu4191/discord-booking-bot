@@ -43,7 +43,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS bookings (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     guild_id      TEXT NOT NULL,
-    booking_date  TEXT NOT NULL,        -- YYYY-MM-DD（依 Asia/Ho_Chi_Minh 時區）
+    booking_date  TEXT NOT NULL,        -- YYYY-MM-DD（依 BOT_TIMEZONE（預設 Asia/Taipei）時區）
     message_id    TEXT UNIQUE,          -- 使用者留言的 Discord message id，用來追蹤編輯/刪除
     location      TEXT NOT NULL,
     scheduled_time TEXT NOT NULL,
@@ -84,6 +84,8 @@ db.exec(`
 ensureColumn("daily_summary", "current_page", "current_page INTEGER NOT NULL DEFAULT 0");
 ensureColumn("daily_summary", "last_touch", "last_touch INTEGER NOT NULL DEFAULT 0"); // 毫秒時間戳，0 = 從來沒人操作過
 ensureColumn("daily_summary", "layout_version", "layout_version INTEGER NOT NULL DEFAULT 0");
+// 引導訊息的版本：0 = 舊文案，1 = 有「請直接編輯留言，不要刪除重打」的新文案（啟動時會把還沒過期的舊文案更新掉）
+ensureColumn("daily_summary", "guide_version", "guide_version INTEGER NOT NULL DEFAULT 0");
 
 // 記錄「某語音群、某天某時段不開放預約」的設定
 db.exec(`
@@ -320,6 +322,17 @@ export function setSummaryView(guildId, bookingDate, page, touchMs = null) {
 
 export function markSummaryLayout(guildId, bookingDate, version = 1) {
   db.prepare(`UPDATE daily_summary SET layout_version = ? WHERE guild_id = ? AND booking_date = ?`).run(version, guildId, bookingDate);
+}
+
+export function markGuideVersion(guildId, bookingDate, version = 1) {
+  db.prepare(`UPDATE daily_summary SET guide_version = ? WHERE guild_id = ? AND booking_date = ?`).run(version, guildId, bookingDate);
+}
+
+// 還沒鎖定、日期是今天（含）以後、引導訊息還是舊文案的班表
+export function getSummariesNeedingGuideUpdate(guildId, todayStr) {
+  return db.prepare(`
+    SELECT * FROM daily_summary WHERE guild_id = ? AND booking_date >= ? AND locked = 0 AND guide_version < 1 ORDER BY booking_date
+  `).all(guildId, todayStr);
 }
 
 // 還沒鎖定、日期是今天（含）以後的班表：閒置復位要掃描的對象

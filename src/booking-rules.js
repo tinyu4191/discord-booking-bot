@@ -1,7 +1,22 @@
 // 預約規則的共用檢查。
 // 一般預約（討論串留言）跟「續約」都走同一份規則，避免兩邊判斷不一致。
 import { getBlockedSlotsByDate, getBookingsByDate } from "./db.js";
-import { isWithinBlockedSlot, timeToMinutes } from "./format.js";
+import { getBookingDateToday, getCurrentTimeMinutes, isWithinBlockedSlot, timeToMinutes } from "./format.js";
+
+// 這個時間點是不是已經過去了：日期早於今天一定算過去；今天的話，時間小於或等於「現在這一分鐘」算過去
+// （預約的目的是「預先」登記，同一分鐘也不行）。日期在今天之後的永遠不算過去
+export function isPastBookingTime(bookingDate, minutes, { today = getBookingDateToday(), nowMinutes = getCurrentTimeMinutes() } = {}) {
+  if (bookingDate < today) return true;
+  if (bookingDate > today) return false;
+  return minutes <= nowMinutes;
+}
+
+// 新增／編輯預約時要不要因為「時間已經過去」而擋下。
+// 編輯舊預約時，只有「把時間改成過去」才擋：時間沒動（只改地點、頻道、代約）仍然允許
+export function shouldRejectPastBooking(bookingDate, newMinutes, existingBooking = null, opts) {
+  if (existingBooking && timeToMinutes(existingBooking.scheduled_time) === newMinutes) return false;
+  return isPastBookingTime(bookingDate, newMinutes, opts);
+}
 
 // 檢查某個語音群、某一天的某個時間點（分鐘數）能不能預約。
 //   - 落在鎖定時段（含頭尾）→ { type: "blocked", slot }

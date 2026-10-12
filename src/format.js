@@ -8,8 +8,10 @@ export function formatGuideText(bookingDate) {
     `${header}\n` +
     "請直接在這個討論串留言預約，格式如下（可複製後修改）：\n" +
     "```\n地點：\n時間：\n頻道：(不確定可寫當日決定)\n代約：(如有代約請填寫遊戲ID)\n```\n" +
-    "・日後要修改頻道等資訊，直接編輯這則留言即可，機器人會自動同步\n" +
-    "・要取消預約，直接刪除這則留言即可"
+    "⚠️ **要修改預約，請直接「編輯」原本的留言，不需要刪除或重打！**\n" +
+    "刪掉再重打，舊的預約可能會殘留在預約板上。\n" +
+    "・要取消預約，才需要刪除那則留言\n" +
+    "・今天的預約，不能預約已經過去的時間"
   );
 }
 
@@ -35,7 +37,20 @@ export function getWeekdayLabel(bookingDate) {
   return chars[getWeekdayIndex(bookingDate)];
 }
 
-// 依 Asia/Ho_Chi_Minh 時區取得今天日期字串 YYYY-MM-DD
+// 機器人判斷「今天／現在幾點」用的時區。使用者在預約留言裡打的時間是台灣時間，所以預設 Asia/Taipei；
+// 可以在 .env 設定 BOT_TIMEZONE 調整（要是有效的 IANA 時區名稱）。每次呼叫才讀，確保 dotenv 已經載入
+export function getBotTimezone() {
+  const tz = (process.env.BOT_TIMEZONE || "").trim() || "Asia/Taipei";
+  try {
+    new Intl.DateTimeFormat("en-CA", { timeZone: tz });
+    return tz;
+  } catch {
+    console.warn(`BOT_TIMEZONE=${tz} 不是有效的時區，改用 Asia/Taipei`);
+    return "Asia/Taipei";
+  }
+}
+
+// 依 BOT_TIMEZONE（預設 Asia/Taipei）取得今天日期字串 YYYY-MM-DD
 // 測試用：如果有設定 TEST_TODAY_OVERRIDE 環境變數（格式 YYYY-MM-DD），直接回傳那個日期
 export function getBookingDateToday() {
   if (process.env.TEST_TODAY_OVERRIDE) {
@@ -43,7 +58,7 @@ export function getBookingDateToday() {
   }
 
   const fmt = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Ho_Chi_Minh",
+    timeZone: getBotTimezone(),
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -184,10 +199,10 @@ export function buildSummaryEmbed(bookingDate, bookings, pageIndex = 0, totalPag
   return embed;
 }
 
-// 依 Asia/Ho_Chi_Minh 時區取得「現在」的分鐘數（0:00 起算），用來判斷鎖定時段是否已過期
+// 依 BOT_TIMEZONE（預設 Asia/Taipei）取得「現在」的分鐘數（0:00 起算），用來判斷鎖定時段是否已過期
 export function getCurrentTimeMinutes() {
   const fmt = new Intl.DateTimeFormat("en-GB", {
-    timeZone: "Asia/Ho_Chi_Minh",
+    timeZone: getBotTimezone(),
     hour: "2-digit",
     minute: "2-digit",
     hour12: false,

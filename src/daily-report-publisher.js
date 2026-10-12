@@ -1,6 +1,6 @@
 // 每日預約總結日報：定時發送 + 訂閱開關
 //
-// 發送時機：每天 00:05 的排程（見 index.js）在鎖定過期討論串之後，呼叫 publishPendingReports，
+// 發送時機：每天 23:59 的排程（見 index.js）在鎖定當天討論串之後（00:05 與啟動時也會補漏），呼叫 publishPendingReports，
 // 把「已鎖定、還沒發過日報」的日子依日期由舊到新各發一份到日報頻道（report_channel_id）。
 // - 沒設定 report_channel_id → 完全不發（也不記錄，之後設定好就會開始發）
 // - 管理頻道輸入「取消訂閱」→ report_enabled = 0：這些日子記成 skipped，之後恢復訂閱也不會補發
@@ -15,11 +15,13 @@ export const REPORT_CATCHUP_DAYS = 3;
 const NO_PING = { parse: [] };
 
 // guildSettings：guild_settings 的一列。deps 只給測試用（可注入假的統計函式）
-export async function publishPendingReports({ client, guildSettings, logToAdmin = async () => {}, today = getBookingDateToday(), getStats = getDailyStats }) {
+export async function publishPendingReports({ client, guildSettings, logToAdmin = async () => {}, today = getBookingDateToday(), getStats = getDailyStats, includeToday = false }) {
   if (!guildSettings?.report_channel_id) return { sent: 0, skipped: 0, failed: 0 };
 
   const guildId = guildSettings.guild_id;
-  const rows = getLockedSummariesBetween(guildId, addDays(today, -REPORT_CATCHUP_DAYS), addDays(today, -1));
+  // 範圍的最後一天：預設是昨天；23:59 的排程（includeToday）連今天也算（但仍要求討論串已鎖定）
+  const lastDate = includeToday ? today : addDays(today, -1);
+  const rows = getLockedSummariesBetween(guildId, addDays(lastDate, -(REPORT_CATCHUP_DAYS - 1)), lastDate);
   const result = { sent: 0, skipped: 0, failed: 0 };
   let channel = null;
 
@@ -64,7 +66,7 @@ export async function handleReportSubscriptionCommand(message, guildSettings, wa
 
   if (wantSubscribe) {
     if (subscribed) {
-      await reply(`ℹ️ 目前已經是訂閱中，不需要重複訂閱。日報會在每天 00:05 左右發到 ${where}。`);
+      await reply(`ℹ️ 目前已經是訂閱中，不需要重複訂閱。日報會在每天 23:59 左右發到 ${where}。`);
       return;
     }
     setReportEnabled(guildSettings.guild_id, true);

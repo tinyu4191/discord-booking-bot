@@ -28,6 +28,7 @@ import {
   getSummaryByThreadId,
   setSummaryMessage,
   markSummaryLayout,
+  markGuideVersion,
   getUnlockedPastSummaries,
   markSummaryLocked,
   deleteSummaryMessage,
@@ -43,9 +44,12 @@ import {
   getWeekdayLabel,
   getWeekdayIndex,
   getBookingDateToday,
+  getBotTimezone,
+  getCurrentTimeMinutes,
   getGameWeekRange,
   addDays,
   timeToMinutes,
+  minutesToTime,
   parseBookingMessage,
   isBookingAttempt,
   isWithinBlockedSlot,
@@ -58,11 +62,12 @@ import {
   parseMMDDToFullDate,
   buildSummaryEmbed,
 } from "./format.js";
-import { checkBookingSlot } from "./booking-rules.js";
+import { checkBookingSlot, shouldRejectPastBooking } from "./booking-rules.js";
 import { buildSlotReply } from "./slot-reply.js";
 import { setupReminders } from "./reminders.js";
 import { setupPageUiDemo } from "./page-ui-demo.js";
 import { setupDailyReportDemo } from "./daily-report-demo.js";
+import { refreshGuideMessages } from "./guide-refresh.js";
 import { missingChannelPermissions, announcementNeeds } from "./perm-check.js";
 import { publishPendingReports, handleReportSubscriptionCommand } from "./daily-report-publisher.js";
 import {
@@ -100,14 +105,25 @@ client.once(Events.ClientReady, async () => {
   // 還沒過期（今天含以後）的班表，從舊版的「多則分頁訊息」換成新版的「單一訊息 + 翻頁」，並刪掉多餘的分頁訊息。
   // 只會處理還沒換過的（layout_version = 0），換完之後每次啟動都不會重複處理
   await migrateLegacySummaries();
-  // 每天固定時間：補開新的一天 + 鎖定已過期的討論串（所有已登記的語音群都會跑一次）
+  // 還沒過期的討論串，引導訊息換成新文案（加註「請直接編輯留言」）。只處理還沒換過的
+  await refreshGuideMessages({ client }).catch((err) => console.warn("更新引導訊息時發生錯誤：", err.message));
+  // 每天 23:59：鎖定「今天」的討論串並發日報（BOT_TIMEZONE 時區，預設台灣）。這個排程明確把今天也算進去；
+  // 其他地方（啟動補鎖定、下面 00:05 補漏）仍然只鎖日期小於今天的
+  cron.schedule(
+    "59 23 * * *",
+    async () => {
+      await lockPastThreadsForAllGuilds({ includeToday: true });
+    },
+    { timezone: getBotTimezone() }
+  );
+  // 每天 00:05：補開新的一天 + 補鎖定（如果 23:59 當下機器人剛好停機，這裡會補上）
   cron.schedule(
     "5 0 * * *",
     async () => {
       await ensureUpcomingThreadsForAllGuilds();
       await lockPastThreadsForAllGuilds();
     },
-    { timezone: "Asia/Ho_Chi_Minh" }
+    { timezone: getBotTimezone() }
   );
 });
 
@@ -121,16 +137,16 @@ async function ensureUpcomingThreadsForAllGuilds() {
   }
 }
 
-async function lockPastThreadsForAllGuilds() {
+async function lockPastThreadsForAllGuilds({ includeToday = false } = {}) {
   for (const settings of getAllGuildSettings()) {
     try {
-      await lockPastThreads(settings);
+      await lockPastThreads(settings, { includeToday });
     } catch (err) {
       console.error(`[${settings.guild_id}] 鎖定討論串時發生錯誤：`, err);
     }
     // 鎖定之後再發日報（讀最新的設定，剛好被人改過訂閱狀態也不會用到舊值）
     try {
-      await publishPendingReports({ client, guildSettings: getGuildSettings(settings.guild_id) ?? settings, logToAdmin });
+      await publishPendingReports({ client, guildSettings: getGuildSettings(settings.guild_id) ?? settings, logToAdmin, includeToday });
     } catch (err) {
       console.error(`[${settings.guild_id}] 發送日報時發生錯誤：`, err);
     }
@@ -195,10 +211,11 @@ async function reuseExistingThread(thread, guildId, bookingDate) {
 }
 
 // 把某個語音群「日期已經過去、還沒被鎖定」的討論串鎖定 + 封存（不刪除）
-async function lockPastThreads(guildSettings) {
+// includeToday = true 時連「今天」也鎖（只有 23:59 的排程會傳）；預設只鎖日期小於今天的
+async function lockPastThreads(guildSettings, { includeToday = false } = {}) {
   const guildId = guildSettings.guild_id;
   const today = getBookingDateToday();
-  const rows = getUnlockedPastSummaries(guildId, today);
+  const rows = getUnlockedPastSummaries(guildId, includeToday ? addDays(today, 1) : today);
 
   for (const row of rows) {
     try {
@@ -274,6 +291,7 @@ async function createDailyThread(parent, guildId, bookingDate) {
   await statsMsg.pin().catch((err) => console.warn("置頂失敗（可能缺少 Manage Messages 權限）：", err.message));
   setSummaryMessage(guildId, bookingDate, thread.id, statsMsg.id);
   markSummaryLayout(guildId, bookingDate, 1); // 新建立的班表一開始就是新版面（單一訊息 + 翻頁）
+  markGuideVersion(guildId, bookingDate, 1); // 引導訊息也是新文案
 
   console.log(`[${guildId}] 已建立討論串：${bookingDate}`);
   const guildSettings = getGuildSettings(guildId);
@@ -397,6 +415,25 @@ async function handleBookingMessage(message, { isEdit }) {
 
   const bookingDate = summaryRow.booking_date;
   const existingBooking = getBookingByMessageId(message.id);
+
+  // 已經過去的時間不能預約（今天：時間小於或等於現在這一分鐘）。
+  // 編輯舊預約時，只有「把時間改成過去」才擋；時間沒動、只改地點或頻道仍然允許
+  if (shouldRejectPastBooking(bookingDate, newMinutes, existingBooking)) {
+    await safeReact(message, "❌");
+    const nowText = minutesToTime(getCurrentTimeMinutes());
+    await message
+      .reply(
+        buildSlotReply(
+          guildId,
+          summaryRow,
+          newMinutes,
+          `⏰ ${time} 已經過去了（現在 ${nowText}），預約要登記「之後」的時段，請改一個還沒到的時間。` +
+            (existingBooking ? "\n（原本的預約沒有變動）" : "")
+        )
+      )
+      .catch(() => {});
+    return;
+  }
 
   // 鎖定時段 + 前後 5 分鐘衝突檢查（跟「預約續約」共用同一份規則，見 booking-rules.js）。
   // 週期鎖定在討論串建立時就已經自動產生對應的單次鎖定紀錄，所以只需要查單次鎖定表。

@@ -35,12 +35,13 @@ import {
   markReminderFinalized,
   purgeOldReminders,
 } from "./db.js";
-import { checkBookingSlot } from "./booking-rules.js";
+import { checkBookingSlot, isPastBookingTime } from "./booking-rules.js";
 import {
   addDays,
   diffDays,
   formatDateLabel,
   getBookingDateToday,
+  getBotTimezone,
   getCurrentTimeMinutes,
   getLocationEmoji,
   getWeekdayLabel,
@@ -91,8 +92,13 @@ function evaluateRenewal(guildId, bookingDate, scheduledTime) {
   };
   const label = slot.date === bookingDate ? slot.time : `${formatDateLabel(slot.date)} ${slot.time}`;
 
-  if (!getSummaryMessage(guildId, slot.date)) {
+  const targetSummary = getSummaryMessage(guildId, slot.date);
+  if (!targetSummary) {
     return { slot, problem: `找不到 ${formatDateLabel(slot.date)} 的預約討論串，沒辦法新增預約` };
+  }
+  // 續約時段已經過了（太晚才按續約），或那天的討論串已經鎖定（例如續約到 23:59 之後）→ 不能續約
+  if (targetSummary.locked || isPastBookingTime(slot.date, slot.minutes)) {
+    return { slot, problem: `續約時段 ${label} 已經過了或討論串已鎖定，沒辦法續約` };
   }
 
   const issue = checkBookingSlot(guildId, slot.date, slot.minutes);
@@ -469,7 +475,7 @@ export function setupReminders({ client, refreshSummaryMessage, logToAdmin }) {
     () => {
       runTick().catch((err) => console.error("預約提醒排程發生錯誤：", err));
     },
-    { timezone: "Asia/Ho_Chi_Minh" }
+    { timezone: getBotTimezone() }
   );
 
   // 每天 00:10 清掉 30 天前已經結案的提醒紀錄
@@ -482,7 +488,7 @@ export function setupReminders({ client, refreshSummaryMessage, logToAdmin }) {
         console.error("清理舊提醒紀錄失敗：", err);
       }
     },
-    { timezone: "Asia/Ho_Chi_Minh" }
+    { timezone: getBotTimezone() }
   );
 
   console.log(`預約提醒已啟動：開始前 ${REMINDER_LEAD_MINUTES} 分鐘提醒，續約 +${RENEW_OFFSET_MINUTES} 分鐘`);
