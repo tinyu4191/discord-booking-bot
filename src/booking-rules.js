@@ -1,7 +1,15 @@
 // 預約規則的共用檢查。
 // 一般預約（討論串留言）跟「續約」都走同一份規則，避免兩邊判斷不一致。
-import { getBlockedSlotsByDate, getBookingsByDate } from "./db.js";
+import { getBlockedSlotsByDate, getBookingsByDate, getLocationWindowsByDate } from "./db.js";
 import { getBookingDateToday, getCurrentTimeMinutes, isWithinBlockedSlot, timeToMinutes } from "./format.js";
+import { isLocationAllowed, windowKeys } from "./location-rules.js";
+
+// 這個時間點、這個地點，被哪個「限定地點時段」擋住（沒擋住回傳 undefined）。
+// 沒給地點（undefined）就不檢查，給空字串會當成「不在任何允許清單內」
+export function findLocationRestriction(windows, minutes, location) {
+  if (location === undefined) return undefined;
+  return windows.find((w) => isWithinBlockedSlot(minutes, w) && !isLocationAllowed(location, windowKeys(w)));
+}
 
 // 這個時間點是不是已經過去了：日期早於今天一定算過去；今天的話，時間小於或等於「現在這一分鐘」算過去
 // （預約的目的是「預先」登記，同一分鐘也不行）。日期在今天之後的永遠不算過去
@@ -20,14 +28,18 @@ export function shouldRejectPastBooking(bookingDate, newMinutes, existingBooking
 
 // 檢查某個語音群、某一天的某個時間點（分鐘數）能不能預約。
 //   - 落在鎖定時段（含頭尾）→ { type: "blocked", slot }
+//   - 落在「限定地點時段」且地點不在允許清單 → { type: "location_restricted", window }（要傳 location 才會檢查）
 //   - 前後 5 分鐘內已有其他預約（不分地點/頻道）→ { type: "conflict", booking }
 //   - 可以預約 → null
 // excludeBookingId：編輯自己的預約時，要把自己排除，不然會跟自己衝突
 //
 // 注意：這個函式是同步的，呼叫端要在「檢查」跟「寫入」之間不要 await，才不會被別的預約插隊
-export function checkBookingSlot(guildId, bookingDate, minutes, excludeBookingId = null) {
+export function checkBookingSlot(guildId, bookingDate, minutes, excludeBookingId = null, location = undefined) {
   const blocked = getBlockedSlotsByDate(guildId, bookingDate).find((slot) => isWithinBlockedSlot(minutes, slot));
   if (blocked) return { type: "blocked", slot: blocked };
+
+  const restricted = findLocationRestriction(getLocationWindowsByDate(guildId, bookingDate), minutes, location);
+  if (restricted) return { type: "location_restricted", window: restricted };
 
   const conflict = getBookingsByDate(guildId, bookingDate).find((b) => {
     if (excludeBookingId && b.id === excludeBookingId) return false;
@@ -53,10 +65,12 @@ export const SUGGEST_MIN_LEAD_MINUTES = nonNegativeInt(process.env.SUGGEST_MIN_L
 //   takenMinutes：已被預約的時間（分鐘數）陣列
 //   notBefore：建議時間的下限（含）。今天的話傳入「現在 + 緩衝」，往前、往後兩側都不會建議比它早的時間
 // 回傳 { before: 分鐘數|null, after: 分鐘數|null }
-export function computeNearestFreeTimes({ blockedSlots, takenMinutes }, minutes, { notBefore = 0 } = {}) {
+export function computeNearestFreeTimes({ blockedSlots, takenMinutes, locationWindows = [], location }, minutes, { notBefore = 0 } = {}) {
   const lower = Math.max(0, notBefore);
   const isFree = (m) =>
-    !blockedSlots.some((slot) => isWithinBlockedSlot(m, slot)) && takenMinutes.every((t) => Math.abs(t - m) >= 5);
+    !blockedSlots.some((slot) => isWithinBlockedSlot(m, slot)) &&
+    !findLocationRestriction(locationWindows, m, location) &&
+    takenMinutes.every((t) => Math.abs(t - m) >= 5);
 
   let before = null;
   for (let m = minutes - 1; m >= lower; m--) {
@@ -78,10 +92,11 @@ export function computeNearestFreeTimes({ blockedSlots, takenMinutes }, minutes,
 }
 
 // 從資料庫讀出某天的鎖定時段與預約，再找前後最近的空檔
-export function findNearestFreeTimes(guildId, bookingDate, minutes, { notBefore = 0 } = {}) {
+export function findNearestFreeTimes(guildId, bookingDate, minutes, { notBefore = 0, location } = {}) {
   const blockedSlots = getBlockedSlotsByDate(guildId, bookingDate);
   const takenMinutes = getBookingsByDate(guildId, bookingDate)
     .map((b) => timeToMinutes(b.scheduled_time))
     .filter((m) => m !== null);
-  return computeNearestFreeTimes({ blockedSlots, takenMinutes }, minutes, { notBefore });
+  const locationWindows = getLocationWindowsByDate(guildId, bookingDate);
+  return computeNearestFreeTimes({ blockedSlots, takenMinutes, locationWindows, location }, minutes, { notBefore });
 }

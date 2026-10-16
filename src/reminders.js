@@ -36,6 +36,7 @@ import {
   purgeOldReminders,
 } from "./db.js";
 import { checkBookingSlot, isPastBookingTime } from "./booking-rules.js";
+import { formatLocationKeys, windowKeys } from "./location-rules.js";
 import {
   addDays,
   diffDays,
@@ -80,7 +81,7 @@ function minutesUntilStart(bookingDate, scheduledTime) {
 // 回傳 { slot, problem }：problem 是 null 代表可以續約，否則是給管理者看的原因
 // 這個函式是同步的，「檢查」跟「新增預約」之間不能 await，才不會被別人插隊
 // ---------------------------------------------------------------------------
-function evaluateRenewal(guildId, bookingDate, scheduledTime) {
+function evaluateRenewal(guildId, bookingDate, scheduledTime, location) {
   const start = timeToMinutes(scheduledTime);
   if (start === null) return { slot: null, problem: "原預約時間格式異常，沒辦法計算續約時段" };
 
@@ -101,12 +102,19 @@ function evaluateRenewal(guildId, bookingDate, scheduledTime) {
     return { slot, problem: `續約時段 ${label} 已經過了或討論串已鎖定，沒辦法續約` };
   }
 
-  const issue = checkBookingSlot(guildId, slot.date, slot.minutes);
+  const issue = checkBookingSlot(guildId, slot.date, slot.minutes, null, location);
   if (issue?.type === "blocked") {
     const s = issue.slot;
     return {
       slot,
       problem: `續約時段 ${label} 落在鎖定時段 ${s.start_time}~${s.end_time}${s.reason ? `（${s.reason}）` : ""}`,
+    };
+  }
+  if (issue?.type === "location_restricted") {
+    const w = issue.window;
+    return {
+      slot,
+      problem: `續約時段 ${label} 落在限定地點時段 ${w.start_time}~${w.end_time}（只開放：${formatLocationKeys(windowKeys(w))}），${location} 不能預約`,
     };
   }
   if (issue?.type === "conflict") {
@@ -271,7 +279,7 @@ async function sweepReminders(settings) {
 }
 
 async function createReminder(settings, booking, bookingDate) {
-  const { slot, problem } = evaluateRenewal(settings.guild_id, bookingDate, booking.scheduled_time);
+  const { slot, problem } = evaluateRenewal(settings.guild_id, bookingDate, booking.scheduled_time, booking.location);
 
   const id = insertReminder({
     guildId: settings.guild_id,
@@ -350,7 +358,7 @@ async function settleMessage(interaction, reminder, text) {
 // 同步完成「再檢查一次 + 新增預約 + 結案」，中間不可以 await
 function renewBooking(reminder, userId) {
   const booking = getBookingById(reminder.booking_id);
-  const { slot, problem } = evaluateRenewal(reminder.guild_id, booking.booking_date, booking.scheduled_time);
+  const { slot, problem } = evaluateRenewal(reminder.guild_id, booking.booking_date, booking.scheduled_time, booking.location);
 
   if (problem) {
     finishReminder(reminder.id, "failed", { handledBy: userId, note: problem });

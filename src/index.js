@@ -68,6 +68,8 @@ import {
 } from "./format.js";
 import { checkBookingSlot, shouldRejectPastBooking } from "./booking-rules.js";
 import { buildSlotReply } from "./slot-reply.js";
+import { describeWindowsForDate } from "./location-ops.js";
+import { formatLocationKeys, windowKeys } from "./location-rules.js";
 import { setupReminders } from "./reminders.js";
 import { setupPageUiDemo } from "./page-ui-demo.js";
 import { setupDailyReportDemo } from "./daily-report-demo.js";
@@ -332,15 +334,18 @@ async function materializeRecurringBlocksForDate(guildId, bookingDate) {
 // 討論串一建立，掃描當天有沒有鎖定時段（含週期樣板剛產生出來的），有的話同步公告
 async function announceBlockedSlotsForNewThread(guildSettings, bookingDate) {
   const allSlots = getBlockedSlotsByDate(guildSettings.guild_id, bookingDate);
-  if (!allSlots.length) return;
+  const windowLines = describeWindowsForDate(guildSettings.guild_id, bookingDate);
+  if (!allSlots.length && !windowLines.length) return;
 
   const lines = allSlots
     .slice()
     .sort((a, b) => timeToMinutes(a.start_time) - timeToMinutes(b.start_time))
     .map((s) => `🚫 ${s.start_time} ~ ${s.end_time}${s.reason ? `（原因：${s.reason}）` : ""}`);
 
-  const announcement = `@everyone 📢 ${formatThreadTitle(bookingDate)} 已開放，以下時段目前不開放預約：\n${lines.join("\n")}`;
-  const lockImage = pickLockAnnouncementImage(allSlots.map((s) => s.reason));
+  let announcement = `@everyone 📢 ${formatThreadTitle(bookingDate)} 已開放`;
+  if (lines.length) announcement += `，以下時段目前不開放預約：\n${lines.join("\n")}`;
+  if (windowLines.length) announcement += `${lines.length ? "\n\n" : "，"}以下時段只接受指定地點的預約：\n${windowLines.join("\n")}`;
+  const lockImage = allSlots.length ? pickLockAnnouncementImage(allSlots.map((s) => s.reason)) : null;
   await sendAnnouncement(guildSettings, announcement, lockImage ? [lockImage] : []);
 }
 
@@ -447,7 +452,7 @@ async function handleBookingMessage(message, { isEdit }) {
   // 鎖定時段 + 前後 5 分鐘衝突檢查（跟「預約續約」共用同一份規則，見 booking-rules.js）。
   // 週期鎖定在討論串建立時就已經自動產生對應的單次鎖定紀錄，所以只需要查單次鎖定表。
   // 排除自己（編輯情境）
-  const slotIssue = checkBookingSlot(guildId, bookingDate, newMinutes, existingBooking?.id);
+  const slotIssue = checkBookingSlot(guildId, bookingDate, newMinutes, existingBooking?.id, location);
 
   if (slotIssue?.type === "blocked") {
     const blockedSlot = slotIssue.slot;
@@ -460,7 +465,27 @@ async function handleBookingMessage(message, { isEdit }) {
           summaryRow,
           newMinutes,
           `這個時段（${blockedSlot.start_time} ~ ${blockedSlot.end_time}）目前不開放預約${blockedSlot.reason ? `（原因：${blockedSlot.reason}）` : ""}，請選擇其他時間。`,
-          EDIT_RETRY_HINT
+          EDIT_RETRY_HINT,
+          location
+        )
+      )
+      .catch(() => {});
+    return;
+  }
+
+  if (slotIssue?.type === "location_restricted") {
+    const win = slotIssue.window;
+    await safeReact(message, "🎯");
+    await switchBoardToMinutes(guildId, bookingDate, newMinutes);
+    await message
+      .reply(
+        buildSlotReply(
+          guildId,
+          summaryRow,
+          newMinutes,
+          `這個時段（${win.start_time} ~ ${win.end_time}）只開放預約：${formatLocationKeys(windowKeys(win))}${win.notes ? `（備註：${win.notes}）` : ""}，「${location}」在這段時間不能預約，請改選開放的地點，或換一個時段。`,
+          EDIT_RETRY_HINT,
+          location
         )
       )
       .catch(() => {});
@@ -478,7 +503,8 @@ async function handleBookingMessage(message, { isEdit }) {
           summaryRow,
           newMinutes,
           `這個時段衝突了：${conflict.location} 在 ${conflict.scheduled_time} 已經有人預約（前後 5 分鐘內不可重複），請改個時間。`,
-          EDIT_RETRY_HINT
+          EDIT_RETRY_HINT,
+          location
         )
       )
       .catch(() => {});

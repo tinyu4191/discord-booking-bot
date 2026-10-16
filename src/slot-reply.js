@@ -12,7 +12,7 @@ import {
 // 預約被擋下來（衝突／鎖定）時的回覆：原本的說明文字 + 最近的空檔建議 + 直接跳到當天班表的連結按鈕。
 // 連結指到當天班表訊息；班表可能分好幾頁，由呼叫端先切到「想預約的時間」所在那一頁
 // footer：選填，附在最後面的一行引導文字（例如 EDIT_RETRY_HINT）
-export function buildSlotReply(guildId, summaryRow, minutes, text, footer = "") {
+export function buildSlotReply(guildId, summaryRow, minutes, text, footer = "", location = undefined) {
   const bookingDate = summaryRow.booking_date;
   let content = text;
 
@@ -20,7 +20,7 @@ export function buildSlotReply(guildId, summaryRow, minutes, text, footer = "") 
     // 今天：建議的時間要比現在晚至少 SUGGEST_MIN_LEAD_MINUTES 分鐘（往前、往後兩側都套用）
     const isToday = bookingDate === getBookingDateToday();
     const notBefore = isToday ? getCurrentTimeMinutes() + SUGGEST_MIN_LEAD_MINUTES : 0;
-    const { before, after } = findNearestFreeTimes(guildId, bookingDate, minutes, { notBefore });
+    const { before, after } = findNearestFreeTimes(guildId, bookingDate, minutes, { notBefore, location });
     const free = [before, after].filter((m) => m !== null).map(minutesToTime);
     if (free.length) content += `\n💡 最近的空檔：${free.join("、")}`;
     else if (isToday) content += "\n💡 今天剩下的時段已經沒有空檔了，可以改約其他日期。";

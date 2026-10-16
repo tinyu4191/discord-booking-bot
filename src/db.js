@@ -114,6 +114,20 @@ db.exec(`
   )
 `);
 
+// 限定地點時段：某天某時段「只接受指定地點」的預約（locations 是 JSON 陣列，內容是 location-rules.js 的 key）
+db.exec(`
+  CREATE TABLE IF NOT EXISTS location_windows (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id     TEXT NOT NULL,
+    booking_date TEXT NOT NULL,
+    start_time   TEXT NOT NULL,  -- HH:MM
+    end_time     TEXT NOT NULL,  -- HH:MM
+    locations    TEXT NOT NULL,  -- JSON，例如 ["dragon","tree"]
+    notes        TEXT,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+  )
+`);
+
 // 預約提醒：預約開始前幾分鐘，在提醒頻道發一則帶「續約／不續約」按鈕的訊息。
 // 一筆提醒 = 某筆預約在某個日期＋時間的那一次提醒（預約被改時間後，會算成新的一筆提醒）
 db.exec(`
@@ -609,6 +623,37 @@ export function getRecurringBlockedSlotById(id) {
 // 只刪樣板本身，不會動到已經產生出來的一次性鎖定（那些要清理由呼叫端另外處理）
 export function deleteRecurringBlockedSlot(id) {
   db.prepare(`DELETE FROM recurring_blocked_slots WHERE id = ?`).run(id);
+}
+
+// ---- 限定地點時段 ----
+
+export function insertLocationWindow({ guildId, bookingDate, startTime, endTime, locations, notes }) {
+  return db
+    .prepare(`INSERT INTO location_windows (guild_id, booking_date, start_time, end_time, locations, notes) VALUES (?, ?, ?, ?, ?, ?)`)
+    .run(guildId, bookingDate, startTime, endTime, JSON.stringify(locations), notes || null).lastInsertRowid;
+}
+
+export function getLocationWindowsByDate(guildId, bookingDate) {
+  return db.prepare(`SELECT * FROM location_windows WHERE guild_id = ? AND booking_date = ? ORDER BY start_time`).all(guildId, bookingDate);
+}
+
+export function getLocationWindowById(id) {
+  return db.prepare(`SELECT * FROM location_windows WHERE id = ?`).get(id);
+}
+
+// 從某天（含）起的限定時段，給 list 跟自動完成選單用
+export function getUpcomingLocationWindows(guildId, fromDate) {
+  return db.prepare(`SELECT * FROM location_windows WHERE guild_id = ? AND booking_date >= ? ORDER BY booking_date, start_time`).all(guildId, fromDate);
+}
+
+export function updateLocationWindow(id, { startTime, endTime, locations, notes }) {
+  db.prepare(`UPDATE location_windows SET start_time = ?, end_time = ?, locations = ?, notes = ? WHERE id = ?`).run(
+    startTime, endTime, JSON.stringify(locations), notes || null, id
+  );
+}
+
+export function deleteLocationWindow(id) {
+  db.prepare(`DELETE FROM location_windows WHERE id = ?`).run(id);
 }
 
 export default db;
