@@ -11,13 +11,14 @@
 //   - 舊的文字指令（鎖定：…）仍然可用，兩邊共用同一份邏輯
 import { Events, InteractionContextType, MessageFlags, PermissionFlagsBits, SlashCommandBuilder } from "discord.js";
 import { addDays, formatDateLabel, formatWeekdayMask, getBookingDateToday, getWeekdayLabel, minutesToTime, parseDaysOption, parseMMDDToFullDate, timeToMinutes } from "./format.js";
-import { getAllRecurringBlockedSlots, getGuildSettings, getAllGuildSettings, getUpcomingBlockedSlots, getUpcomingLocationWindows, ruleWeekdayMask } from "./db.js";
+import { getAllRecurringBlockedSlots, getGuildSettings, getAllGuildSettings, getUpcomingBlockedSlots, getUpcomingLocationWindows, getUpcomingVacations, ruleWeekdayMask } from "./db.js";
 import { addWeekly, editBlock, editWeekly, removeWeekly } from "./block-ops.js";
 import { handleReportSubscriptionCommand } from "./daily-report-publisher.js";
 import { addWindow, editWindow, removeWindow } from "./location-ops.js";
+import { addVacation, editVacation, endVacation } from "./vacation-ops.js";
 import { formatLocationKeys, parseLocationOption, suggestLocations, windowKeys } from "./location-rules.js";
 
-export const SLASH_COMMAND_NAMES = ["lock", "weekly", "restrict", "report", "testthread", "help"];
+export const SLASH_COMMAND_NAMES = ["lock", "weekly", "restrict", "vacation", "report", "testthread", "help"];
 const EPHEMERAL = MessageFlags.Ephemeral;
 
 // ---------------------------------------------------------------------------
@@ -87,6 +88,19 @@ export function buildCommandDefs() {
       .addIntegerOption((o) => o.setName("id").setDescription("要解除的限定時段（從選單挑）").setRequired(true).setAutocomplete(true)))
     .addSubcommand((s) => s.setName("list").setDescription("列出今天起所有限定地點時段"));
 
+  const vacation = mk("vacation", "休假：一段日期整天不開放預約，只發一則公告，到期自動恢復")
+    .addSubcommand((s) => s.setName("add").setDescription("設定休假（含開始日與結束日，既有預約會取消並通知）")
+      .addStringOption((o) => o.setName("start").setDescription("開始日（可選下拉，或輸入 MM/DD）").setRequired(true).setAutocomplete(true))
+      .addStringOption((o) => o.setName("end").setDescription("結束日，含這一天（可選下拉，或輸入 MM/DD）").setRequired(true).setAutocomplete(true))
+      .addStringOption((o) => o.setName("reason").setDescription("原因（選填，會一起公告）").setRequired(false)))
+    .addSubcommand((s) => s.setName("edit").setDescription("延長或縮短休假、修改原因")
+      .addIntegerOption((o) => o.setName("id").setDescription("要修改的休假（從選單挑）").setRequired(true).setAutocomplete(true))
+      .addStringOption((o) => o.setName("end").setDescription("新的結束日（不改就不填）").setRequired(false).setAutocomplete(true))
+      .addStringOption((o) => o.setName("reason").setDescription("新的原因（填 - 代表清掉）").setRequired(false)))
+    .addSubcommand((s) => s.setName("end").setDescription("提前結束休假，立刻恢復開放並公告")
+      .addIntegerOption((o) => o.setName("id").setDescription("要結束的休假（從選單挑）").setRequired(true).setAutocomplete(true)))
+    .addSubcommand((s) => s.setName("list").setDescription("列出目前與未來的休假"));
+
   const report = mk("report", "每日預約日報：訂閱或取消訂閱")
     .addSubcommand((s) => s.setName("subscribe").setDescription("恢復訂閱日報"))
     .addSubcommand((s) => s.setName("unsubscribe").setDescription("取消訂閱日報"));
@@ -98,7 +112,7 @@ export function buildCommandDefs() {
       .addStringOption((o) => o.setName("date").setDescription("完整日期 YYYY-MM-DD").setRequired(true)));
 
   const help = mk("help", "顯示管理指令說明");
-  return [lock, weekly, restrict, report, testthread, help].map((b) => b.toJSON());
+  return [lock, weekly, restrict, vacation, report, testthread, help].map((b) => b.toJSON());
 }
 
 // ---------------------------------------------------------------------------
@@ -112,9 +126,9 @@ export function normalizeTime(input) {
 }
 
 // 今天起 14 天的日期選單；value 是完整日期 YYYY-MM-DD
-export function suggestDates(today, typed = "") {
+export function suggestDates(today, typed = "", span = 14) {
   const q = typed.trim();
-  return Array.from({ length: 14 }, (_, i) => addDays(today, i))
+  return Array.from({ length: span }, (_, i) => addDays(today, i))
     .map((date, i) => ({ name: `${formatDateLabel(date)} (${getWeekdayLabel(date)})${i === 0 ? " 今天" : i === 1 ? " 明天" : ""}`, value: date }))
     .filter((c) => !q || c.name.includes(q) || c.value.includes(q))
     .slice(0, 25);
@@ -153,6 +167,17 @@ export function suggestRules(guildId, typed = "") {
     .slice(0, 25);
 }
 
+export function suggestVacations(guildId, today, typed = "") {
+  const q = typed.trim();
+  return getUpcomingVacations(guildId, today)
+    .map((v) => ({
+      name: clip(`#${v.id}｜${formatDateLabel(v.start_date)} ~ ${formatDateLabel(v.end_date)}${v.reason ? `｜${v.reason}` : ""}`),
+      value: v.id,
+    }))
+    .filter((c) => !q || c.name.includes(q))
+    .slice(0, 25);
+}
+
 export function suggestWindows(guildId, today, typed = "") {
   const q = typed.trim();
   return getUpcomingLocationWindows(guildId, today)
@@ -183,6 +208,9 @@ export const SLASH_HELP_TEXT = [
   "**/restrict add** 日期、開始、結束、地點、備註 — 這段時間只接受指定地點（龍王／蝴蝶王／樹王／阿卡伊農，可多選）的預約，會發公告",
   "**/restrict edit** 編號、開始、結束、地點、備註 — 修改，只發一則「調整」公告",
   "**/restrict remove** 編號 / **/restrict list** — 解除／查詢",
+  "",
+  "**/vacation add** 開始日、結束日、原因 — 一段日期整天不開放預約（含結束日），只發一則公告，既有預約取消並通知，結束後自動公告恢復",
+  "**/vacation edit** 編號、結束日、原因 — 延長或縮短 / **/vacation end** 編號 — 提前結束 / **/vacation list** — 查詢",
   "",
   "**/report subscribe** / **/report unsubscribe** — 恢復／取消每天的預約日報",
   "**/testthread create** / **delete** 日期 — 測試討論串",
@@ -286,6 +314,25 @@ export async function runSlashCommand(i, settings, deps) {
       if (!rows.length) return "今天起沒有任何限定地點時段。";
       return "🎯 限定地點時段：\n" + rows.map((w) => `#${w.id}｜${formatDateLabel(w.booking_date)} (${getWeekdayLabel(w.booking_date)})｜${w.start_time}~${w.end_time}｜只開放 ${formatLocationKeys(windowKeys(w))}${w.notes ? `｜${w.notes}` : ""}`).join("\n");
     }
+    case "vacation.add": {
+      const start = parseMMDDToFullDate(i.options.getString("start")), end = parseMMDDToFullDate(i.options.getString("end"));
+      if (!start || !end) return "日期格式不對，請從選單挑，或輸入 MM/DD（例如 11/01）。";
+      return (await addVacation(guildId, { start, end, reason: cleanReason(i.options.getString("reason")) }, deps.opsDeps(settings))).message;
+    }
+    case "vacation.edit": {
+      const rawEnd = i.options.getString("end");
+      const end = rawEnd === null ? undefined : parseMMDDToFullDate(rawEnd);
+      if (end === null) return "日期格式不對，請從選單挑，或輸入 MM/DD（例如 11/01）。";
+      const reason = i.options.getString("reason");
+      return (await editVacation(guildId, i.options.getInteger("id"), { end, reason: reason === null ? undefined : cleanReason(reason) }, deps.opsDeps(settings))).message;
+    }
+    case "vacation.end":
+      return (await endVacation(guildId, i.options.getInteger("id"), deps.opsDeps(settings))).message;
+    case "vacation.list": {
+      const rows = getUpcomingVacations(guildId, getBookingDateToday());
+      if (!rows.length) return "目前沒有休假設定。";
+      return "🏖️ 休假：\n" + rows.map((v) => `#${v.id}｜${formatDateLabel(v.start_date)} (${getWeekdayLabel(v.start_date)}) ~ ${formatDateLabel(v.end_date)} (${getWeekdayLabel(v.end_date)})（含結束日，隔天恢復）${v.reason ? `｜${v.reason}` : ""}`).join("\n");
+    }
     case "report.subscribe":
     case "report.unsubscribe": {
       const a = adapter("", guildId);
@@ -318,9 +365,11 @@ export async function handleSlashInteraction(i, deps) {
     if (inManagement) {
       const focused = i.options.getFocused(true);
       const today = getBookingDateToday();
-      if (focused.name === "date") choices = suggestDates(today, String(focused.value));
+      if (i.commandName === "vacation" && ["start", "end"].includes(focused.name)) choices = suggestDates(today, String(focused.value), 60);
+      else if (focused.name === "date") choices = suggestDates(today, String(focused.value));
       else if (focused.name === "start" || focused.name === "end") choices = suggestTimes(String(focused.value));
       else if (focused.name === "location") choices = suggestLocations(String(focused.value));
+      else if (focused.name === "id" && i.commandName === "vacation") choices = suggestVacations(settings.guild_id, today, String(focused.value));
       else if (focused.name === "id" && i.commandName === "restrict") choices = suggestWindows(settings.guild_id, today, String(focused.value));
       else if (focused.name === "id") choices = i.commandName === "weekly" ? suggestRules(settings.guild_id, String(focused.value)) : suggestBlocks(settings.guild_id, today, String(focused.value));
     }

@@ -43,6 +43,7 @@ const counts = {
   summary_pages: countRows("summary_pages"),
   blocked_slots: countRows("blocked_slots"),
   location_windows: countRows("location_windows"),
+  vacations: countRows("vacations"),
   recurring_blocked_slots: countRows("recurring_blocked_slots"),
   booking_reminders: countRows("booking_reminders"),
   daily_reports: countRows("daily_reports"),
@@ -76,6 +77,7 @@ async function main() {
       db.prepare(`DELETE FROM summary_pages WHERE guild_id = ?`).run(guildId);
       db.prepare(`DELETE FROM blocked_slots WHERE guild_id = ?`).run(guildId);
       db.prepare(`DELETE FROM location_windows WHERE guild_id = ?`).run(guildId);
+      db.prepare(`DELETE FROM vacations WHERE guild_id = ?`).run(guildId);
       db.prepare(`DELETE FROM recurring_exceptions WHERE rule_id IN (SELECT id FROM recurring_blocked_slots WHERE guild_id = ?)`).run(guildId);
       db.prepare(`DELETE FROM recurring_blocked_slots WHERE guild_id = ?`).run(guildId);
       db.prepare(`DELETE FROM booking_reminders WHERE guild_id = ?`).run(guildId);

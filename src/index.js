@@ -69,6 +69,7 @@ import {
 import { checkBookingSlot, shouldRejectPastBooking } from "./booking-rules.js";
 import { buildSlotReply } from "./slot-reply.js";
 import { describeWindowsForDate } from "./location-ops.js";
+import { announceEndedVacations, isVacationDate } from "./vacation-ops.js";
 import { formatLocationKeys, windowKeys } from "./location-rules.js";
 import { setupReminders } from "./reminders.js";
 import { setupPageUiDemo } from "./page-ui-demo.js";
@@ -123,6 +124,7 @@ client.once(Events.ClientReady, async () => {
   setupPageUiDemo(client);
   await registerSlashCommands(client).catch((err) => console.warn("註冊斜線指令時發生錯誤：", err.message));
   setupDailyReportDemo(client); // 每日日報版面試作（假資料 / 真實資料），同樣只在 DEMO_GUILD_ID 的測試伺服器出現
+  await announceEndedVacationsForAllGuilds();
   await ensureUpcomingThreadsForAllGuilds();
   await lockPastThreadsForAllGuilds();
   // 還沒過期（今天含以後）的班表，從舊版的「多則分頁訊息」換成新版的「單一訊息 + 翻頁」，並刪掉多餘的分頁訊息。
@@ -145,12 +147,24 @@ client.once(Events.ClientReady, async () => {
   cron.schedule(
     "5 0 * * *",
     async () => {
+      await announceEndedVacationsForAllGuilds();
       await ensureUpcomingThreadsForAllGuilds();
       await lockPastThreadsForAllGuilds();
     },
     { timezone: getBotTimezone() }
   );
 });
+
+// 休假結束日已過 → 每個語音群發一則「恢復開放」公告（沒有休假就什麼都不做）
+async function announceEndedVacationsForAllGuilds() {
+  for (const settings of getAllGuildSettings()) {
+    try {
+      await announceEndedVacations(settings.guild_id, blockOpsDeps(settings));
+    } catch (err) {
+      console.error(`[${settings.guild_id}] 發送休假結束公告時發生錯誤：`, err);
+    }
+  }
+}
 
 async function ensureUpcomingThreadsForAllGuilds() {
   for (const settings of getAllGuildSettings()) {
@@ -333,6 +347,8 @@ async function materializeRecurringBlocksForDate(guildId, bookingDate) {
 
 // 討論串一建立，掃描當天有沒有鎖定時段（含週期樣板剛產生出來的），有的話同步公告
 async function announceBlockedSlotsForNewThread(guildSettings, bookingDate) {
+  // 休假期間整天都不開放，已經在設定休假時公告過了，不要每天重複 @everyone
+  if (isVacationDate(guildSettings.guild_id, bookingDate)) return;
   const allSlots = getBlockedSlotsByDate(guildSettings.guild_id, bookingDate);
   const windowLines = describeWindowsForDate(guildSettings.guild_id, bookingDate);
   if (!allSlots.length && !windowLines.length) return;
@@ -464,7 +480,9 @@ async function handleBookingMessage(message, { isEdit }) {
           guildId,
           summaryRow,
           newMinutes,
-          `這個時段（${blockedSlot.start_time} ~ ${blockedSlot.end_time}）目前不開放預約${blockedSlot.reason ? `（原因：${blockedSlot.reason}）` : ""}，請選擇其他時間。`,
+          blockedSlot.vacation
+            ? `${formatDateLabel(bookingDate)} 是休假期間（到 ${formatDateLabel(blockedSlot.vacation.end_date)} 為止），整天不開放預約${blockedSlot.reason ? `（${blockedSlot.reason}）` : ""}，請改約 ${formatDateLabel(addDays(blockedSlot.vacation.end_date, 1))} 之後。`
+            : `這個時段（${blockedSlot.start_time} ~ ${blockedSlot.end_time}）目前不開放預約${blockedSlot.reason ? `（原因：${blockedSlot.reason}）` : ""}，請選擇其他時間。`,
           EDIT_RETRY_HINT,
           location
         )

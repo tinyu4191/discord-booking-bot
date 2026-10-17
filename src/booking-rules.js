@@ -1,6 +1,6 @@
 // 預約規則的共用檢查。
 // 一般預約（討論串留言）跟「續約」都走同一份規則，避免兩邊判斷不一致。
-import { getBlockedSlotsByDate, getBookingsByDate, getLocationWindowsByDate } from "./db.js";
+import { getBlockedSlotsByDate, getBookingsByDate, getLocationWindowsByDate, getVacationForDate } from "./db.js";
 import { getBookingDateToday, getCurrentTimeMinutes, isWithinBlockedSlot, timeToMinutes } from "./format.js";
 import { isLocationAllowed, windowKeys } from "./location-rules.js";
 
@@ -34,8 +34,16 @@ export function shouldRejectPastBooking(bookingDate, newMinutes, existingBooking
 // excludeBookingId：編輯自己的預約時，要把自己排除，不然會跟自己衝突
 //
 // 注意：這個函式是同步的，呼叫端要在「檢查」跟「寫入」之間不要 await，才不會被別的預約插隊
+// 某天「實際生效」的鎖定：一般鎖定 + 休假（整天，當成一筆 00:00~23:59 的鎖定，帶 vacation 標記）
+export function getEffectiveBlockedSlots(guildId, bookingDate) {
+  const slots = getBlockedSlotsByDate(guildId, bookingDate);
+  const vacation = getVacationForDate(guildId, bookingDate);
+  if (!vacation) return slots;
+  return [{ id: null, guild_id: guildId, booking_date: bookingDate, start_time: "00:00", end_time: "23:59", reason: vacation.reason, vacation }, ...slots];
+}
+
 export function checkBookingSlot(guildId, bookingDate, minutes, excludeBookingId = null, location = undefined) {
-  const blocked = getBlockedSlotsByDate(guildId, bookingDate).find((slot) => isWithinBlockedSlot(minutes, slot));
+  const blocked = getEffectiveBlockedSlots(guildId, bookingDate).find((slot) => isWithinBlockedSlot(minutes, slot));
   if (blocked) return { type: "blocked", slot: blocked };
 
   const restricted = findLocationRestriction(getLocationWindowsByDate(guildId, bookingDate), minutes, location);
@@ -93,7 +101,7 @@ export function computeNearestFreeTimes({ blockedSlots, takenMinutes, locationWi
 
 // 從資料庫讀出某天的鎖定時段與預約，再找前後最近的空檔
 export function findNearestFreeTimes(guildId, bookingDate, minutes, { notBefore = 0, location } = {}) {
-  const blockedSlots = getBlockedSlotsByDate(guildId, bookingDate);
+  const blockedSlots = getEffectiveBlockedSlots(guildId, bookingDate);
   const takenMinutes = getBookingsByDate(guildId, bookingDate)
     .map((b) => timeToMinutes(b.scheduled_time))
     .filter((m) => m !== null);

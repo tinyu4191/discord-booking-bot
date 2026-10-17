@@ -128,6 +128,18 @@ db.exec(`
   )
 `);
 
+// 休假：start_date ~ end_date（含頭尾）整天不開放預約
+db.exec(`
+  CREATE TABLE IF NOT EXISTS vacations (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id   TEXT NOT NULL,
+    start_date TEXT NOT NULL,  -- YYYY-MM-DD
+    end_date   TEXT NOT NULL,  -- YYYY-MM-DD（含這一天）
+    reason     TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )
+`);
+
 // 預約提醒：預約開始前幾分鐘，在提醒頻道發一則帶「續約／不續約」按鈕的訊息。
 // 一筆提醒 = 某筆預約在某個日期＋時間的那一次提醒（預約被改時間後，會算成新的一筆提醒）
 db.exec(`
@@ -654,6 +666,33 @@ export function updateLocationWindow(id, { startTime, endTime, locations, notes 
 
 export function deleteLocationWindow(id) {
   db.prepare(`DELETE FROM location_windows WHERE id = ?`).run(id);
+}
+
+// ---- 休假 ----
+
+export function insertVacation({ guildId, startDate, endDate, reason }) {
+  return db.prepare(`INSERT INTO vacations (guild_id, start_date, end_date, reason) VALUES (?, ?, ?, ?)`).run(guildId, startDate, endDate, reason || null).lastInsertRowid;
+}
+export function getVacationById(id) {
+  return db.prepare(`SELECT * FROM vacations WHERE id = ?`).get(id);
+}
+// 某一天是不是在休假期間（回傳那筆休假，沒有就 undefined）
+export function getVacationForDate(guildId, date) {
+  return db.prepare(`SELECT * FROM vacations WHERE guild_id = ? AND start_date <= ? AND end_date >= ? ORDER BY start_date LIMIT 1`).get(guildId, date, date);
+}
+// 結束日還沒過（今天含以後）的休假
+export function getUpcomingVacations(guildId, today) {
+  return db.prepare(`SELECT * FROM vacations WHERE guild_id = ? AND end_date >= ? ORDER BY start_date`).all(guildId, today);
+}
+// 已經結束（結束日早於今天）、還沒發「恢復開放」公告的休假
+export function getEndedVacations(guildId, today) {
+  return db.prepare(`SELECT * FROM vacations WHERE guild_id = ? AND end_date < ? ORDER BY start_date`).all(guildId, today);
+}
+export function updateVacation(id, { endDate, reason }) {
+  db.prepare(`UPDATE vacations SET end_date = ?, reason = ? WHERE id = ?`).run(endDate, reason || null, id);
+}
+export function deleteVacation(id) {
+  db.prepare(`DELETE FROM vacations WHERE id = ?`).run(id);
 }
 
 export default db;
