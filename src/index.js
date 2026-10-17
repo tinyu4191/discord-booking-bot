@@ -94,7 +94,15 @@ const client = new Client({
     GatewayIntentBits.MessageContent,
   ],
   partials: [Partials.Message, Partials.Channel],
+  // 小型 VM 記憶體有限：每 30 分鐘清掉超過 30 分鐘的快取訊息（需要時會重新抓取，MessageUpdate 也有 partial 保底）
+  sweepers: {
+    messages: { interval: 1800, lifetime: 1800 },
+  },
 });
+
+// 安全網：Node 22 遇到未處理的 rejection 會直接結束程序，pm2 就會無聲重啟。改成記錄下來、繼續運作
+process.on("unhandledRejection", (err) => console.error("[unhandledRejection]", err));
+client.on(Events.Error, (err) => console.error("[client error]", err));
 
 // 班表翻頁（單一訊息 + 按鈕／下拉選單）、閒置自動復位。要在其他地方呼叫 refreshSummaryMessage 之前先註冊好 client
 setupSummaryBoard(client);
@@ -366,19 +374,24 @@ async function announceBlockedSlotsForNewThread(guildSettings, bookingDate) {
 }
 
 client.on(Events.MessageCreate, async (message) => {
-  if (message.author.bot) return;
-  if (!message.guildId) return; // 忽略私訊
+  // 跟 MessageUpdate / MessageDelete 一樣包 try/catch：這裡丟出的錯誤沒人接，會變成 unhandled rejection 讓程序重啟
+  try {
+    if (message.author.bot) return;
+    if (!message.guildId) return; // 忽略私訊
 
-  const guildSettings = getGuildSettings(message.guildId);
-  if (!guildSettings) return; // 這個語音群還沒被登記，忽略
+    const guildSettings = getGuildSettings(message.guildId);
+    if (!guildSettings) return; // 這個語音群還沒被登記，忽略
 
-  if (guildSettings.management_channel_id && message.channelId === guildSettings.management_channel_id) {
-    await handleAdminCommand(message, guildSettings);
-    return;
+    if (guildSettings.management_channel_id && message.channelId === guildSettings.management_channel_id) {
+      await handleAdminCommand(message, guildSettings);
+      return;
+    }
+
+    if (!message.channel.isThread()) return;
+    await handleBookingMessage(message, { isEdit: false });
+  } catch (err) {
+    console.error("處理新訊息時發生錯誤：", err);
   }
-
-  if (!message.channel.isThread()) return;
-  await handleBookingMessage(message, { isEdit: false });
 });
 
 client.on(Events.MessageUpdate, async (oldMessage, newMessage) => {

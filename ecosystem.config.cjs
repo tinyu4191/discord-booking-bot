@@ -10,6 +10,7 @@ module.exports = {
       max_restarts: 10,       // 短時間內重啟太多次就停止，避免無限重啟洗 log
       min_uptime: "30s",      // 跑超過 30 秒才算「成功啟動」，避免壞掉的版本一直重啟
       restart_delay: 5000,    // 重啟前等 5 秒
+      max_memory_restart: "300M", // 記憶體超過 300MB 就由 pm2 乾淨重啟（避免被系統 OOM 亂殺）
       env: {
         NODE_ENV: "production",
       },
